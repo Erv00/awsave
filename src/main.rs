@@ -26,6 +26,8 @@ use tokio::{
     process::Command,
 };
 
+mod zfs;
+
 const UPLOAD_CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 const MAX_CONCURRENT: usize = 32;
 
@@ -41,6 +43,14 @@ fn open_full(dataset: &str, snapshot: &str) -> Result<tokio::process::Child, io:
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()*/
+}
+
+fn open_incremental(dataset: &str, from: &str, to: &str) -> Result<tokio::process::Child, io::Error> {
+    Command::new("sudo")
+        .args(["zfs", "send", "-Ri", &format!("@{}", from), &format!("{dataset}@{to}")])
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
 }
 
 pub async fn read_exact_noerr<R: AsyncRead + Unpin>(
