@@ -37,17 +37,27 @@ fn open_full(dataset: &str, snapshot: &str) -> Result<tokio::process::Child, io:
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-    
+
     /*Command::new("cat")
-        .args(["testfile"])
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()*/
+    .args(["testfile"])
+    .stderr(Stdio::piped())
+    .stdout(Stdio::piped())
+    .spawn()*/
 }
 
-fn open_incremental(dataset: &str, from: &str, to: &str) -> Result<tokio::process::Child, io::Error> {
+fn open_incremental(
+    dataset: &str,
+    from: &str,
+    to: &str,
+) -> Result<tokio::process::Child, io::Error> {
     Command::new("sudo")
-        .args(["zfs", "send", "-Ri", &format!("@{}", from), &format!("{dataset}@{to}")])
+        .args([
+            "zfs",
+            "send",
+            "-Ri",
+            &format!("@{}", from),
+            &format!("{dataset}@{to}"),
+        ])
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -331,7 +341,14 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let c = open_full("zpool", "T2").unwrap();
+    let snaps = zfs::get_current_state(&client, "testbucket-paws").await?;
+    println!("Current snapshots:");
+    for s in snaps {
+        println!("{}", s);
+    }
+    println!("That's all");
+
+    let c = open_full("zpool", "T3").unwrap();
 
     //tokio::time::sleep(time::Duration::from_millis(200)).await;
 
@@ -340,7 +357,7 @@ async fn main() -> anyhow::Result<()> {
     let o = tokio::io::BufReader::new(o);
 
     let mut pc = UploadConfig {
-        key: "testdata_T2".to_string(),
+        key: "AWSAVE-full@zpool@T3".to_string(),
         bucket: "testbucket-paws".to_string(),
         id: "asd001".to_string(),
     };

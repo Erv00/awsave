@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.100"
 aws-config = "1.8.4"
 aws-sdk-s3 = "1.96.0"
+aws-smithy-types-convert = { version = "0.60.9", features = ["convert-chrono"] }
 chacha20 = "0.9.1"
 chrono = "0.4.42"
 hex = "0.4.3"
