@@ -27,9 +27,11 @@ use tokio::{
 };
 
 mod zfs;
+mod kex;
 
 const UPLOAD_CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 const MAX_CONCURRENT: usize = 32;
+const  BUCKET: &str = "testbucket-paws";
 
 fn open_full(dataset: &str, snapshot: &str) -> Result<tokio::process::Child, io::Error> {
     Command::new("sudo")
@@ -348,7 +350,7 @@ async fn main() -> anyhow::Result<()> {
     }
     println!("That's all");
 
-    let c = open_full("zpool", "T3").unwrap();
+    /*let c = open_full("zpool", "T3").unwrap();
 
     //tokio::time::sleep(time::Duration::from_millis(200)).await;
 
@@ -383,6 +385,27 @@ async fn main() -> anyhow::Result<()> {
             println!("Cought error {}", e);
 
             print_lines(c.stderr.expect("No child stderr")).await?;
+        }
+    }*/
+
+    let now = chrono::Utc::now();
+
+    let state = zfs::get_current_state(&client, BUCKET).await?;
+    let actions = zfs::check_state(&vec!["zpool"], &state, now);
+
+    if actions.len() == 0 {
+        println!("Nothing to do!");
+    }
+
+    for act in actions {
+        let res = act.perform_aws(&client).await?;
+
+        match res {
+            zfs::ActionPerformResult::Delete(delete_object_output) => todo!(),
+            zfs::ActionPerformResult::CreateFull(upload_result) => {
+                println!("Full upload succesfull, hash is {}", hex::encode(&upload_result.hash))
+            },
+            zfs::ActionPerformResult::CreateIncremental(upload_result) => todo!(),
         }
     }
 

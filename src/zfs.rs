@@ -1,8 +1,19 @@
-use std::{collections::{HashMap, HashSet}, fmt::{self, Write}};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::{self, Write},
+    sync::Arc,
+};
 
-use aws_sdk_s3::{Client, types::ObjectStorageClass};
+use aws_sdk_s3::{Client, operation::delete_object::DeleteObjectOutput, types::ObjectStorageClass};
 use aws_smithy_types_convert::date_time::DateTimeExt;
+use chacha20::cipher::KeyIvInit;
 use chrono::TimeDelta;
+
+use anyhow::anyhow;
+use tokio::sync::Mutex;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+use crate::UploadConfig;
 
 const SNAPSHOT_PREFIX: &str = "AWSAVE-";
 
@@ -13,7 +24,7 @@ pub struct FullSnapshot {
     dataset: String,
     name: String,
     date: UtcDatetime,
-    size: usize,
+    size: Option<usize>,
     storage_class: Option<ObjectStorageClass>,
 }
 
@@ -22,7 +33,7 @@ impl FullSnapshot {
         dataset: String,
         name: String,
         date: UtcDatetime,
-        size: usize,
+        size: Option<usize>,
         storage_class: Option<ObjectStorageClass>,
     ) -> Self {
         Self {
@@ -40,7 +51,7 @@ pub struct IncrementalSnapshot {
     dataset: String,
     name: String,
     date: UtcDatetime,
-    size: usize,
+    size: Option<usize>,
     storage_class: Option<ObjectStorageClass>,
 
     base: String,
@@ -51,7 +62,7 @@ impl IncrementalSnapshot {
         dataset: String,
         name: String,
         date: UtcDatetime,
-        size: usize,
+        size: Option<usize>,
         storage_class: Option<ObjectStorageClass>,
         base: String,
     ) -> Self {
@@ -74,11 +85,22 @@ pub enum Snapshot {
 
 impl fmt::Display for Snapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(if let Snapshot::Full(_) = self {"Full snapshot "} else {"Incremental snapshot "})?;
+        f.write_str(if let Snapshot::Full(_) = self {
+            "Full snapshot "
+        } else {
+            "Incremental snapshot "
+        })?;
         f.write_str(self.dataset())?;
         f.write_char('@')?;
         f.write_str(self.name())?;
-        f.write_fmt(format_args!(" taken at {}, class is {}", self.date(), self.storage_class().as_ref().map(|s|s.to_string()).unwrap_or("MISSING".to_string())))
+        f.write_fmt(format_args!(
+            " taken at {}, class is {}",
+            self.date(),
+            self.storage_class()
+                .as_ref()
+                .map(|s| s.to_string())
+                .unwrap_or("MISSING".to_string())
+        ))
     }
 }
 
@@ -110,15 +132,159 @@ impl Snapshot {
             Snapshot::Incremental(incremental_snapshot) => &incremental_snapshot.storage_class,
         }
     }
+
+    fn aws_key(&self) -> String {
+        match self {
+            Snapshot::Full(s) => format!("{}full@{}@{}", SNAPSHOT_PREFIX, s.dataset, s.name),
+            Snapshot::Incremental(s) => format!(
+                "{}incremental@{}@{}@{}",
+                SNAPSHOT_PREFIX, s.dataset, s.name, s.base
+            ),
+        }
+    }
 }
 
-enum Action {
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct UploadResult {
+    pub hash: Vec<u8>,
+    key: [u8; 32],
+    iv: [u8; 12],
+}
+
+pub enum Action {
     Delete(Snapshot),
     CreateFull { dataset: String },
     CreateIncremental { dataset: String, from: String },
 }
 
-fn check_state(desired_datasets: &[&str], state: &[Snapshot], now: UtcDatetime) -> Vec<Action> {
+pub enum ActionPerformResult {
+    Delete(DeleteObjectOutput),
+    CreateFull(UploadResult),
+    CreateIncremental(UploadResult),
+}
+
+impl Action {
+    pub async fn perform_aws(&self, client: &Client) -> anyhow::Result<ActionPerformResult> {
+        match self {
+            Action::Delete(snapshot) => Ok(ActionPerformResult::Delete(
+                Self::perform_aws_delete(snapshot, client).await?,
+            )),
+            Action::CreateFull { dataset } => Ok(ActionPerformResult::CreateFull(
+                Self::perform_aws_create_full(dataset, client).await?,
+            )),
+            Action::CreateIncremental { dataset, from } => Ok(ActionPerformResult::CreateIncremental(
+                Self::perform_aws_create_incremental(dataset, from, client).await?,
+            )),
+        }
+    }
+
+    fn perform_aws_delete(
+        s: &Snapshot,
+        client: &Client,
+    ) -> impl Future<
+        Output = Result<
+            DeleteObjectOutput,
+            aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::delete_object::DeleteObjectError>,
+        >,
+    > {
+        client
+            .delete_object()
+            .bucket(crate::BUCKET)
+            .key(s.aws_key())
+            .send()
+    }
+
+    async fn perform_aws_create_full(ds: &String, client: &Client) -> anyhow::Result<UploadResult> {
+        let now = chrono::Utc::now();
+        let snapname = now.format("%Y%m%d").to_string();
+
+        // Make snapshot
+        //todo!("Make snapshot {}", snapname);
+        let snapname = "T3".to_string();
+
+        let snap = FullSnapshot::new(ds.to_owned(), snapname.clone(), now, None, None);
+
+        let mut pc = UploadConfig {
+            key: Snapshot::Full(snap).aws_key(),
+            bucket: crate::BUCKET.to_string(),
+            id: "asd001".to_string(),
+        };
+
+        let c = crate::open_full(ds, &snapname)?;
+
+        let o = c.stdout.expect("No child output stream");
+
+        let o = tokio::io::BufReader::new(o);
+
+        let multipart_upload_res = client
+            .create_multipart_upload()
+            .bucket(&pc.bucket)
+            .key(&pc.key)
+            .send()
+            .await?;
+
+        let upload_id = multipart_upload_res
+            .upload_id()
+            .ok_or(anyhow!("Missing upload_id after CreateMultipartUpload"))?;
+        pc.id = upload_id.to_string();
+
+        let cc = Arc::new(Mutex::new(client.clone()));
+
+        let (key, iv) = crate::kex::generate_key();
+        let cipher = chacha20::ChaCha20::new(&key.into(), &iv.into());
+
+        let hash = crate::encypt_and_upload(cc, pc, o, cipher).await?;
+
+        Ok(UploadResult { hash, key, iv })
+    }
+
+    async fn perform_aws_create_incremental(ds: &String, from: &String, client: &Client) -> anyhow::Result<UploadResult> {
+        let now = chrono::Utc::now();
+        let snapname = now.format("%Y%m%d").to_string();
+
+        // Make snapshot
+        todo!("Make snapshot {}", snapname);
+
+        let snap = IncrementalSnapshot::new(ds.to_owned(), snapname, now, None, None, from.to_owned());
+
+        let mut pc = UploadConfig {
+            key: Snapshot::Incremental(snap).aws_key(),
+            bucket: crate::BUCKET.to_string(),
+            id: "asd001".to_string(),
+        };
+
+        let c = crate::open_incremental(&snap.dataset, from, &snap.name)?;
+
+        let o = c.stdout.expect("No child output stream");
+
+        let o = tokio::io::BufReader::new(o);
+
+        let multipart_upload_res = client
+            .create_multipart_upload()
+            .bucket(&pc.bucket)
+            .key(&pc.key)
+            .send()
+            .await?;
+
+        let upload_id = multipart_upload_res
+            .upload_id()
+            .ok_or(anyhow!("Missing upload_id after CreateMultipartUpload"))?;
+        pc.id = upload_id.to_string();
+
+        let cc = Arc::new(Mutex::new(client.clone()));
+
+        let (key, iv) = crate::kex::generate_key();
+        let cipher = chacha20::ChaCha20::new(&key.into(), &iv.into());
+
+        let hash = crate::encypt_and_upload(cc, pc, o, cipher).await?;
+
+        Ok(UploadResult { hash, key, iv })
+    }
+
+
+}
+
+pub fn check_state(desired_datasets: &[&str], state: &[Snapshot], now: UtcDatetime) -> Vec<Action> {
     let mut needed_actions: Vec<Action> = Vec::new();
     let mut new_snaps: HashSet<&str> = HashSet::new();
     // All desired datasets MUST have a full copy that is less then 180 days old
@@ -206,7 +372,7 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
         .filter_map(|o| {
             let name = o.key?;
             let date = o.last_modified?;
-            let size = o.size?.try_into().ok()?;
+            let size = o.size.map(|s| s.try_into().expect("negative size"));
             let storage_class = o.storage_class;
 
             let name = name
@@ -269,7 +435,7 @@ mod tests {
         let fs = FullSnapshot {
             dataset: "test1".to_owned(),
             name: "T1".to_owned(),
-            size: 200,
+            size: Some(200),
             date: now - TimeDelta::days(1),
             storage_class: None,
         };
@@ -287,7 +453,7 @@ mod tests {
         let fs = FullSnapshot {
             dataset: "test1".to_owned(),
             name: "T1".to_owned(),
-            size: 200,
+            size: Some(200),
             date: now - TimeDelta::days(10),
             storage_class: None,
         };
@@ -309,7 +475,7 @@ mod tests {
         let fs = FullSnapshot {
             dataset: "test1".to_owned(),
             name: "T1".to_owned(),
-            size: 200,
+            size: Some(200),
             date: now - TimeDelta::days(1000),
             storage_class: None,
         };
