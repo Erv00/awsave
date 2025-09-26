@@ -1,6 +1,10 @@
-use aws_sdk_s3::{error::SdkError, operation::put_object::{PutObjectError, PutObjectOutput}, Client};
+use aws_sdk_s3::{
+    Client,
+    error::SdkError,
+    operation::put_object::{PutObjectError, PutObjectOutput},
+};
 use rand::RngCore;
-use rsa::{pkcs8::DecodePublicKey, Oaep, RsaPublicKey};
+use rsa::{Oaep, RsaPublicKey, pkcs8::DecodePublicKey};
 use sha2::Sha256;
 
 const MASTER_KEY_STR: &str = "-----BEGIN PUBLIC KEY-----
@@ -42,12 +46,24 @@ impl DecryptionInfo {
 
         let enc_data = mk.encrypt(&mut rng, padding, &data[..])?;
 
-        Ok(DecryptionInfo { filename: res.filename.clone(), hash: res.hash.clone(), key_iv: enc_data })
+        Ok(DecryptionInfo {
+            filename: res.filename.clone(),
+            hash: res.hash.clone(),
+            key_iv: enc_data,
+        })
     }
 
-    pub async fn save_to_aws(&self, client: &Client) -> Result<PutObjectOutput, SdkError<PutObjectError>> {
+    pub async fn save_to_aws(
+        &self,
+        client: &Client,
+    ) -> Result<PutObjectOutput, SdkError<PutObjectError>> {
         let b = serde_json::serialize(&self);
-        client.put_object().bucket(crate::BUCKET)
-        .key(format!("{}.key", &self.filename)).body(b).send().await
+        client
+            .put_object()
+            .bucket(crate::BUCKET)
+            .key(format!("{}.key", &self.filename))
+            .body(b)
+            .send()
+            .await
     }
 }

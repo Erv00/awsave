@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::{self, Write},
     process::ExitStatus,
-    sync::Arc,
 };
 
 use aws_sdk_s3::{Client, operation::delete_object::DeleteObjectOutput, types::ObjectStorageClass};
@@ -11,7 +10,7 @@ use chacha20::cipher::KeyIvInit;
 use chrono::TimeDelta;
 
 use anyhow::anyhow;
-use tokio::{process::Command, sync::Mutex};
+use tokio::process::Command;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::UploadConfig;
@@ -233,13 +232,11 @@ impl Action {
             .ok_or(anyhow!("Missing upload_id after CreateMultipartUpload"))?;
         pc.id = upload_id.to_string();
 
-        let cc = Arc::new(Mutex::new(client.clone()));
-
         let (key, iv) = crate::kex::generate_key();
         let cipher = chacha20::ChaCha20::new(&key.into(), &iv.into());
         let filename = pc.key.clone();
 
-        let hash = crate::encypt_and_upload(cc, pc, o, cipher).await?;
+        let hash = crate::encypt_and_upload(client.clone(), pc, o, cipher).await?;
 
         Ok(UploadResult {
             filename,
@@ -262,8 +259,14 @@ impl Action {
             return Err(anyhow!("Failed to make snapshot"));
         }
 
-        let snap =
-            IncrementalSnapshot::new(ds.to_owned(), snapname.clone(), now, None, None, from.to_owned());
+        let snap = IncrementalSnapshot::new(
+            ds.to_owned(),
+            snapname.clone(),
+            now,
+            None,
+            None,
+            from.to_owned(),
+        );
 
         let mut pc = UploadConfig {
             key: Snapshot::Incremental(snap).aws_key(),
@@ -289,13 +292,11 @@ impl Action {
             .ok_or(anyhow!("Missing upload_id after CreateMultipartUpload"))?;
         pc.id = upload_id.to_string();
 
-        let cc = Arc::new(Mutex::new(client.clone()));
-
         let (key, iv) = crate::kex::generate_key();
         let cipher = chacha20::ChaCha20::new(&key.into(), &iv.into());
         let filename = pc.key.clone();
 
-        let hash = crate::encypt_and_upload(cc, pc, o, cipher).await?;
+        let hash = crate::encypt_and_upload(client.clone(), pc, o, cipher).await?;
 
         Ok(UploadResult {
             filename,

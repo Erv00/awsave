@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::{io, process::Stdio};
 
 use anyhow::Context;
@@ -18,7 +17,6 @@ use aws_sdk_s3::{
 use chacha20::cipher::StreamCipher;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncBufReadExt;
-use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -113,7 +111,7 @@ async fn abort_upload(
 }
 
 async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
-    client: Arc<Mutex<Client>>,
+    client: Client,
     pc: UploadConfig,
     mut source: R,
     mut cipher: C,
@@ -170,7 +168,6 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
                         Ok(Err(e)) => {
                             println!("ERROR, aborting");
                             running.abort_all();
-                            let client = client.lock().await;
                             if let Err(ie) = abort_upload(&client, &pc).await {
                                 return Err(ie)
                                     .context(format!("Failed to upload part #{}", part_number))
@@ -186,7 +183,6 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
             Err(e) => {
                 println!("ERROR, aborting");
                 running.abort_all();
-                let client = client.lock().await;
                 if let Err(ie) = abort_upload(&client, &pc).await {
                     return Err(ie)
                         .context(format!("Failed to read part #{}", part_number))
@@ -210,7 +206,6 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
             Ok(Err(e)) => {
                 println!("ERROR, aborting");
                 running.abort_all();
-                let client = client.lock().await;
                 if let Err(ie) = abort_upload(&client, &pc).await {
                     return Err(ie)
                         .context(format!("Failed to upload part #{}", part_number))
@@ -226,8 +221,6 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
     let completed_multipart_upload = CompletedMultipartUpload::builder()
         .set_parts(Some(upload_parts))
         .build();
-
-    let client = client.lock().await;
 
     let cmu = client
         .complete_multipart_upload()
@@ -258,13 +251,12 @@ struct UploadConfig {
 }
 
 async fn upload_part_outer(
-    client: Arc<Mutex<Client>>,
+    client: Client,
     pc: UploadConfig,
     data: Vec<u8>,
     part_number: i32,
 ) -> Result<CompletedPart, SdkError<UploadPartError>> {
-    let c = client.lock().await;
-    upload_part(&c, &pc, data, part_number).await
+    upload_part(&client, &pc, data, part_number).await
 }
 
 async fn upload_part(
