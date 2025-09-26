@@ -5,18 +5,17 @@ use anyhow::Context;
 use anyhow::anyhow;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::{
-    self as s3, Client,
+    Client,
     error::SdkError,
     operation::{
         abort_multipart_upload::{AbortMultipartUploadError, AbortMultipartUploadOutput},
-        create_multipart_upload::CreateMultipartUploadOutput,
         upload_part::UploadPartError,
     },
     primitives::ByteStream,
     types::{CompletedMultipartUpload, CompletedPart},
 };
 
-use chacha20::cipher::{KeyIvInit, StreamCipher};
+use chacha20::cipher::StreamCipher;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::Mutex;
@@ -26,12 +25,12 @@ use tokio::{
     process::Command,
 };
 
-mod zfs;
 mod kex;
+mod zfs;
 
 const UPLOAD_CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 const MAX_CONCURRENT: usize = 32;
-const  BUCKET: &str = "testbucket-paws";
+const BUCKET: &str = "testbucket-paws";
 
 fn open_full(dataset: &str, snapshot: &str) -> Result<tokio::process::Child, io::Error> {
     Command::new("sudo")
@@ -293,11 +292,8 @@ async fn upload_part(
 
 #[::tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let key = [0x42; 32];
-    let nonce = [0x24; 12];
     let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
     let client = aws_sdk_s3::Client::new(&config);
-    let cipher = chacha20::ChaCha20::new(&key.into(), &nonce.into());
 
     // ... make some calls with the client
     let resp = client
@@ -316,6 +312,45 @@ async fn main() -> anyhow::Result<()> {
             println!("Failed to get: {}", e.into_service_error());
         }
     }
+
+    let snaps = zfs::get_current_state(&client, "testbucket-paws").await?;
+    println!("Current snapshots:");
+    for s in snaps {
+        println!("{}", s);
+    }
+    println!("That's all");
+
+    let now = chrono::Utc::now();
+
+    let state = zfs::get_current_state(&client, BUCKET).await?;
+    let actions = zfs::check_state(&vec!["zpool"], &state, now);
+
+    if actions.len() == 0 {
+        println!("Nothing to do!");
+    }
+
+    for act in actions {
+        let res = act.perform_aws(&client).await?;
+
+        match res {
+            zfs::ActionPerformResult::Delete(delete_object_output) => todo!(),
+            zfs::ActionPerformResult::CreateFull(upload_result)
+            | zfs::ActionPerformResult::CreateIncremental(upload_result) => {
+                let di = kex::DecryptionInfo::encrypt(upload_result)
+                    .context("Uploaded backup, but key could not be encrypted")?;
+                di.save_to_aws(&client).await.with_context(|| format!("Uploaded backup. but key could not be uploaded. Filename: {}, hash: {}, keyiv: {}", &di.filename, hex::encode(&di.hash), hex::encode(&di.key_iv)))?;
+
+                println!(
+                    "Upload of {} succesfull, hash is {}, key_iv is {}",
+                    di.filename,
+                    hex::encode(&di.hash),
+                    hex::encode(&di.key_iv)
+                );
+            }
+        }
+    }
+
+    println!("Cleaning up...");
 
     let resp = client
         .list_multipart_uploads()
@@ -342,72 +377,6 @@ async fn main() -> anyhow::Result<()> {
             println!("Failed to get: {}", e.into_service_error());
         }
     };
-
-    let snaps = zfs::get_current_state(&client, "testbucket-paws").await?;
-    println!("Current snapshots:");
-    for s in snaps {
-        println!("{}", s);
-    }
-    println!("That's all");
-
-    /*let c = open_full("zpool", "T3").unwrap();
-
-    //tokio::time::sleep(time::Duration::from_millis(200)).await;
-
-    let o = c.stdout.expect("No child output stream");
-
-    let o = tokio::io::BufReader::new(o);
-
-    let mut pc = UploadConfig {
-        key: "AWSAVE-full@zpool@T3".to_string(),
-        bucket: "testbucket-paws".to_string(),
-        id: "asd001".to_string(),
-    };
-
-    // Open upload
-    let multipart_upload_res: CreateMultipartUploadOutput = client
-        .create_multipart_upload()
-        .bucket(&pc.bucket)
-        .key(&pc.key)
-        .send()
-        .await?;
-
-    let upload_id = multipart_upload_res
-        .upload_id()
-        .ok_or(anyhow!("Missing upload_id after CreateMultipartUpload"))?;
-    pc.id = upload_id.to_string();
-
-    let cc = Arc::new(Mutex::new(client));
-
-    match encypt_and_upload(cc.clone(), pc, o, cipher).await {
-        Ok(hash) => println!("Upload done, hash is {}", hex::encode(hash)),
-        Err(e) => {
-            println!("Cought error {}", e);
-
-            print_lines(c.stderr.expect("No child stderr")).await?;
-        }
-    }*/
-
-    let now = chrono::Utc::now();
-
-    let state = zfs::get_current_state(&client, BUCKET).await?;
-    let actions = zfs::check_state(&vec!["zpool"], &state, now);
-
-    if actions.len() == 0 {
-        println!("Nothing to do!");
-    }
-
-    for act in actions {
-        let res = act.perform_aws(&client).await?;
-
-        match res {
-            zfs::ActionPerformResult::Delete(delete_object_output) => todo!(),
-            zfs::ActionPerformResult::CreateFull(upload_result) => {
-                println!("Full upload succesfull, hash is {}", hex::encode(&upload_result.hash))
-            },
-            zfs::ActionPerformResult::CreateIncremental(upload_result) => todo!(),
-        }
-    }
 
     Ok(())
 }

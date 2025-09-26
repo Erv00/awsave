@@ -1,3 +1,53 @@
+use aws_sdk_s3::{error::SdkError, operation::put_object::{PutObjectError, PutObjectOutput}, Client};
+use rand::RngCore;
+use rsa::{pkcs8::DecodePublicKey, Oaep, RsaPublicKey};
+use sha2::Sha256;
+
+const MASTER_KEY_STR: &str = "-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtsQsUV8QpqrygsY+2+JC
+Q6Fw8/omM71IM2N/R8pPbzbgOl0p78MZGsgPOQ2HSznjD0FPzsH8oO2B5Uftws04
+LHb2HJAYlz25+lN5cqfHAfa3fgmC38FfwBkn7l582UtPWZ/wcBOnyCgb3yLcvJrX
+yrt8QxHJgvWO23ITrUVYszImbXQ67YGS0YhMrbixRzmo2tpm3JcIBtnHrEUMsT0N
+fFdfsZhTT8YbxBvA8FdODgEwx7u/vf3J9qbi4+Kv8cvqyJuleIRSjVXPsIMnoejI
+n04APPKIjpMyQdnWlby7rNyQtE4+CV+jcFjqJbE/Xilcvqxt6DirjFCvYeKYl1uH
+LwIDAQAB
+-----END PUBLIC KEY-----";
+
 pub fn generate_key() -> ([u8; 32], [u8; 12]) {
-    return ([0x42; 32], [0x24; 12])
+    let mut rng = rand::thread_rng();
+    let mut key = [0; 32];
+    let mut iv = [0; 12];
+
+    rng.fill_bytes(&mut key);
+    rng.fill_bytes(&mut iv);
+
+    (key, iv)
+}
+
+pub struct DecryptionInfo {
+    pub filename: String,
+    pub hash: Vec<u8>,
+    pub key_iv: Vec<u8>,
+}
+
+impl DecryptionInfo {
+    pub fn encrypt(res: crate::zfs::UploadResult) -> anyhow::Result<DecryptionInfo> {
+        let mk = RsaPublicKey::from_public_key_pem(MASTER_KEY_STR).expect("Inavild master key");
+        let mut rng = rand::thread_rng();
+        let padding = Oaep::new::<Sha256>();
+
+        let mut data: Vec<u8> = Vec::new();
+        data.extend_from_slice(&res.key);
+        data.extend_from_slice(&res.iv);
+
+        let enc_data = mk.encrypt(&mut rng, padding, &data[..])?;
+
+        Ok(DecryptionInfo { filename: res.filename.clone(), hash: res.hash.clone(), key_iv: enc_data })
+    }
+
+    pub async fn save_to_aws(&self, client: &Client) -> Result<PutObjectOutput, SdkError<PutObjectError>> {
+        let b = serde_json::serialize(&self);
+        client.put_object().bucket(crate::BUCKET)
+        .key(format!("{}.key", &self.filename)).body(b).send().await
+    }
 }

@@ -11,6 +11,8 @@ aws-smithy-types-convert = { version = "0.60.9", features = ["convert-chrono"] }
 chacha20 = "0.9.1"
 chrono = "0.4.42"
 hex = "0.4.3"
+rand = "0.8.5"
+rsa = { version = "0.9.8", features = ["sha2"] }
 sha2 = "0.10.9"
 tokio = { version = "1.47.1", features = ["full"] }
 zeroize = { version = "1.8.1", features = ["derive"] }

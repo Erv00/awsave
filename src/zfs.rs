@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::{self, Write},
+    process::ExitStatus,
     sync::Arc,
 };
 
@@ -10,7 +11,7 @@ use chacha20::cipher::KeyIvInit;
 use chrono::TimeDelta;
 
 use anyhow::anyhow;
-use tokio::sync::Mutex;
+use tokio::{process::Command, sync::Mutex};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::UploadConfig;
@@ -146,9 +147,10 @@ impl Snapshot {
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct UploadResult {
+    pub filename: String,
     pub hash: Vec<u8>,
-    key: [u8; 32],
-    iv: [u8; 12],
+    pub key: [u8; 32],
+    pub iv: [u8; 12],
 }
 
 pub enum Action {
@@ -172,9 +174,11 @@ impl Action {
             Action::CreateFull { dataset } => Ok(ActionPerformResult::CreateFull(
                 Self::perform_aws_create_full(dataset, client).await?,
             )),
-            Action::CreateIncremental { dataset, from } => Ok(ActionPerformResult::CreateIncremental(
-                Self::perform_aws_create_incremental(dataset, from, client).await?,
-            )),
+            Action::CreateIncremental { dataset, from } => {
+                Ok(ActionPerformResult::CreateIncremental(
+                    Self::perform_aws_create_incremental(dataset, from, client).await?,
+                ))
+            }
         }
     }
 
@@ -199,8 +203,9 @@ impl Action {
         let snapname = now.format("%Y%m%d").to_string();
 
         // Make snapshot
-        //todo!("Make snapshot {}", snapname);
-        let snapname = "T3".to_string();
+        if !take_snapshot(&ds, &snapname).await?.success() {
+            return Err(anyhow!("Failed to make snapshot"));
+        }
 
         let snap = FullSnapshot::new(ds.to_owned(), snapname.clone(), now, None, None);
 
@@ -232,20 +237,33 @@ impl Action {
 
         let (key, iv) = crate::kex::generate_key();
         let cipher = chacha20::ChaCha20::new(&key.into(), &iv.into());
+        let filename = pc.key.clone();
 
         let hash = crate::encypt_and_upload(cc, pc, o, cipher).await?;
 
-        Ok(UploadResult { hash, key, iv })
+        Ok(UploadResult {
+            filename,
+            hash,
+            key,
+            iv,
+        })
     }
 
-    async fn perform_aws_create_incremental(ds: &String, from: &String, client: &Client) -> anyhow::Result<UploadResult> {
+    async fn perform_aws_create_incremental(
+        ds: &String,
+        from: &String,
+        client: &Client,
+    ) -> anyhow::Result<UploadResult> {
         let now = chrono::Utc::now();
         let snapname = now.format("%Y%m%d").to_string();
 
         // Make snapshot
-        todo!("Make snapshot {}", snapname);
+        if !take_snapshot(&ds, &snapname).await?.success() {
+            return Err(anyhow!("Failed to make snapshot"));
+        }
 
-        let snap = IncrementalSnapshot::new(ds.to_owned(), snapname, now, None, None, from.to_owned());
+        let snap =
+            IncrementalSnapshot::new(ds.to_owned(), snapname.clone(), now, None, None, from.to_owned());
 
         let mut pc = UploadConfig {
             key: Snapshot::Incremental(snap).aws_key(),
@@ -253,7 +271,7 @@ impl Action {
             id: "asd001".to_string(),
         };
 
-        let c = crate::open_incremental(&snap.dataset, from, &snap.name)?;
+        let c = crate::open_incremental(&ds, from, &snapname)?;
 
         let o = c.stdout.expect("No child output stream");
 
@@ -275,13 +293,17 @@ impl Action {
 
         let (key, iv) = crate::kex::generate_key();
         let cipher = chacha20::ChaCha20::new(&key.into(), &iv.into());
+        let filename = pc.key.clone();
 
         let hash = crate::encypt_and_upload(cc, pc, o, cipher).await?;
 
-        Ok(UploadResult { hash, key, iv })
+        Ok(UploadResult {
+            filename,
+            hash,
+            key,
+            iv,
+        })
     }
-
-
 }
 
 pub fn check_state(desired_datasets: &[&str], state: &[Snapshot], now: UtcDatetime) -> Vec<Action> {
@@ -371,6 +393,9 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
         .into_iter()
         .filter_map(|o| {
             let name = o.key?;
+            if name.ends_with(".key") {
+                return None;
+            }
             let date = o.last_modified?;
             let size = o.size.map(|s| s.try_into().expect("negative size"));
             let storage_class = o.storage_class;
@@ -407,6 +432,24 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
             }
         })
         .collect())
+}
+
+async fn take_snapshot(dataset: &str, name: &str) -> Result<ExitStatus, std::io::Error> {
+    Command::new("zfs")
+        .arg("snapshot")
+        .arg(format!("{}@{}", dataset, name))
+        .spawn()?
+        .wait()
+        .await
+}
+
+async fn delete_snapshot(dataset: &str, name: &str) -> Result<ExitStatus, std::io::Error> {
+    Command::new("zfs")
+        .arg("destroy")
+        .arg(format!("{}@{}", dataset, name))
+        .spawn()?
+        .wait()
+        .await
 }
 
 #[cfg(test)]
