@@ -4,7 +4,11 @@ use std::{
     process::ExitStatus,
 };
 
-use aws_sdk_s3::{Client, operation::delete_object::DeleteObjectOutput, types::ObjectStorageClass};
+use aws_sdk_s3::{
+    Client,
+    operation::delete_object::DeleteObjectOutput,
+    types::{ObjectStorageClass, RestoreStatus},
+};
 use aws_smithy_types_convert::date_time::DateTimeExt;
 use chacha20::cipher::KeyIvInit;
 use chrono::TimeDelta;
@@ -21,11 +25,12 @@ type UtcDatetime = chrono::DateTime<chrono::Utc>;
 
 #[derive(Clone)]
 pub struct FullSnapshot {
-    dataset: String,
+    pub dataset: String,
     name: String,
     date: UtcDatetime,
     size: Option<usize>,
     storage_class: Option<ObjectStorageClass>,
+    restore_status: Option<RestoreStatus>,
 }
 
 impl FullSnapshot {
@@ -35,6 +40,7 @@ impl FullSnapshot {
         date: UtcDatetime,
         size: Option<usize>,
         storage_class: Option<ObjectStorageClass>,
+        restore_status: Option<RestoreStatus>,
     ) -> Self {
         Self {
             dataset,
@@ -42,17 +48,19 @@ impl FullSnapshot {
             date,
             size,
             storage_class,
+            restore_status,
         }
     }
 }
 
 #[derive(Clone)]
 pub struct IncrementalSnapshot {
-    dataset: String,
-    name: String,
-    date: UtcDatetime,
-    size: Option<usize>,
-    storage_class: Option<ObjectStorageClass>,
+    pub dataset: String,
+    pub name: String,
+    pub date: UtcDatetime,
+    pub size: Option<usize>,
+    pub storage_class: Option<ObjectStorageClass>,
+    pub restore_status: Option<RestoreStatus>,
 
     base: String,
 }
@@ -64,6 +72,7 @@ impl IncrementalSnapshot {
         date: UtcDatetime,
         size: Option<usize>,
         storage_class: Option<ObjectStorageClass>,
+        restore_status: Option<RestoreStatus>,
         base: String,
     ) -> Self {
         Self {
@@ -72,7 +81,33 @@ impl IncrementalSnapshot {
             date,
             size,
             storage_class,
+            restore_status,
             base,
+        }
+    }
+}
+
+pub enum AvailabilityInfo {
+    CanRestore,
+    RestoreInProgress,
+    Available,
+}
+
+impl From<(ObjectStorageClass, Option<RestoreStatus>)> for AvailabilityInfo {
+    fn from(value: (ObjectStorageClass, Option<RestoreStatus>)) -> Self {
+        let (ty, rs) = value;
+        match ty {
+            ObjectStorageClass::DeepArchive | ObjectStorageClass::Glacier => match rs {
+                None => unimplemented!("Restore status is None"),
+                Some(rs) => match (rs.is_restore_in_progress, rs.restore_expiry_date) {
+                    (Some(true), _) => Self::RestoreInProgress,
+                    (Some(false), Some(_)) => Self::Available,
+                    (None, _) => Self::CanRestore,
+                    _ => unimplemented!("Snapshot has unknown availability: {}, {:?}", ty, rs),
+                },
+            },
+            ObjectStorageClass::Standard => AvailabilityInfo::Available,
+            _ => unimplemented!("Snapshot has unknown availability: {}, {:?}", ty, rs),
         }
     }
 }
@@ -105,35 +140,35 @@ impl fmt::Display for Snapshot {
 }
 
 impl Snapshot {
-    fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         match self {
             Snapshot::Full(full_snapshot) => &full_snapshot.name,
             Snapshot::Incremental(incremental_snapshot) => &incremental_snapshot.name,
         }
     }
 
-    fn dataset(&self) -> &str {
+    pub fn dataset(&self) -> &str {
         match self {
             Snapshot::Full(full_snapshot) => &full_snapshot.dataset,
             Snapshot::Incremental(incremental_snapshot) => &incremental_snapshot.dataset,
         }
     }
 
-    fn date(&self) -> &UtcDatetime {
+    pub fn date(&self) -> &UtcDatetime {
         match self {
             Snapshot::Full(full_snapshot) => &full_snapshot.date,
             Snapshot::Incremental(incremental_snapshot) => &incremental_snapshot.date,
         }
     }
 
-    fn storage_class(&self) -> &Option<ObjectStorageClass> {
+    pub fn storage_class(&self) -> &Option<ObjectStorageClass> {
         match self {
             Snapshot::Full(full_snapshot) => &full_snapshot.storage_class,
             Snapshot::Incremental(incremental_snapshot) => &incremental_snapshot.storage_class,
         }
     }
 
-    fn aws_key(&self) -> String {
+    pub fn aws_key(&self) -> String {
         match self {
             Snapshot::Full(s) => format!("{}full@{}@{}", SNAPSHOT_PREFIX, s.dataset, s.name),
             Snapshot::Incremental(s) => format!(
@@ -141,6 +176,17 @@ impl Snapshot {
                 SNAPSHOT_PREFIX, s.dataset, s.name, s.base
             ),
         }
+    }
+
+    pub fn availability(&self) -> Option<AvailabilityInfo> {
+        let ty = self.storage_class().to_owned()?;
+        let stat = match self {
+            Snapshot::Full(full_snapshot) => &full_snapshot.restore_status,
+            Snapshot::Incremental(incremental_snapshot) => &incremental_snapshot.restore_status,
+        }
+        .to_owned();
+
+        Some(AvailabilityInfo::from((ty, stat)))
     }
 }
 
@@ -206,7 +252,7 @@ impl Action {
             return Err(anyhow!("Failed to make snapshot"));
         }
 
-        let snap = FullSnapshot::new(ds.to_owned(), snapname.clone(), now, None, None);
+        let snap = FullSnapshot::new(ds.to_owned(), snapname.clone(), now, None, None, None);
 
         let mut pc = UploadConfig {
             key: Snapshot::Full(snap).aws_key(),
@@ -263,6 +309,7 @@ impl Action {
             ds.to_owned(),
             snapname.clone(),
             now,
+            None,
             None,
             None,
             from.to_owned(),
@@ -400,6 +447,7 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
             let date = o.last_modified?;
             let size = o.size.map(|s| s.try_into().expect("negative size"));
             let storage_class = o.storage_class;
+            let restore_status = o.restore_status;
 
             let name = name
                 .strip_prefix(SNAPSHOT_PREFIX)
@@ -417,6 +465,7 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
                     date.to_chrono_utc().ok()?,
                     size,
                     storage_class,
+                    restore_status,
                 ))),
                 "incremental" => {
                     let base = parts.get(3)?;
@@ -426,6 +475,7 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
                         date.to_chrono_utc().ok()?,
                         size,
                         storage_class,
+                        restore_status,
                         base.to_string(),
                     )))
                 }
@@ -497,6 +547,7 @@ mod tests {
             size: Some(200),
             date: now - TimeDelta::days(1),
             storage_class: None,
+            restore_status: None,
         };
         let state = vec![Snapshot::Full(fs)];
 
@@ -515,6 +566,7 @@ mod tests {
             size: Some(200),
             date: now - TimeDelta::days(10),
             storage_class: None,
+            restore_status: None,
         };
         let state = vec![Snapshot::Full(fs)];
 
@@ -537,6 +589,7 @@ mod tests {
             size: Some(200),
             date: now - TimeDelta::days(1000),
             storage_class: None,
+            restore_status: None,
         };
         let state = vec![Snapshot::Full(fs)];
 

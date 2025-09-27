@@ -24,6 +24,7 @@ use tokio::{
 };
 
 mod kex;
+mod load;
 mod zfs;
 
 const UPLOAD_CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
@@ -59,6 +60,19 @@ fn open_incremental(
         ])
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
+        .spawn()
+}
+
+pub fn zfs_recv(dataset: &str, snapshot: Option<&str>) -> Result<tokio::process::Child, io::Error> {
+    let name = match snapshot {
+        Some(snap) => format!("{}@{}", dataset, snap),
+        None => dataset.to_owned(),
+    };
+    Command::new("sudo")
+        .arg("zfs")
+        .arg("recv")
+        .arg(name)
+        .stdin(Stdio::piped())
         .spawn()
 }
 
@@ -136,8 +150,8 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
             Ok(n) => {
                 println!("Read {} bytes", n);
                 let mut chunk = buffer[..n].to_vec();
-                cipher.apply_keystream(&mut chunk);
                 hasher.update(&chunk);
+                cipher.apply_keystream(&mut chunk);
 
                 total += n;
                 println!(
@@ -167,7 +181,7 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
                         Ok(Ok(part)) => {
                             println!("Part done");
                             upload_parts.push(part)
-                        },
+                        }
                         Ok(Err(e)) => {
                             println!("ERROR, aborting");
                             running.abort_all();
@@ -208,7 +222,7 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
             Ok(Ok(part)) => {
                 println!("Part done, {} remain", running.len());
                 upload_parts.push(part)
-            },
+            }
             Ok(Err(e)) => {
                 println!("ERROR, aborting");
                 running.abort_all();
@@ -295,6 +309,9 @@ async fn main() -> anyhow::Result<()> {
     let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
     let client = aws_sdk_s3::Client::new(&config);
 
+    load::full_recover::<chacha20::ChaCha20>(&client, "zpool/testme").await?;
+    return Ok(());
+
     let resp = client
         .list_multipart_uploads()
         .bucket("testbucket-paws")
@@ -331,7 +348,7 @@ async fn main() -> anyhow::Result<()> {
     let now = chrono::Utc::now();
 
     let state = zfs::get_current_state(&client, BUCKET).await?;
-    let actions = zfs::check_state(&vec!["zpool"], &state, now);
+    let actions = zfs::check_state(&vec!["zpool/testme"], &state, now);
 
     if actions.len() == 0 {
         println!("Nothing to do!");
