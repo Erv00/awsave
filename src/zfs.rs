@@ -436,7 +436,22 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
 }
 
 async fn take_snapshot(dataset: &str, name: &str) -> Result<ExitStatus, std::io::Error> {
-    Command::new("zfs")
+    let s = Command::new("sudo")
+        .arg("zfs")
+        .arg("list")
+        .arg("-t")
+        .arg("snapshot")
+        .arg(format!("{}@{}", dataset, name))
+        .spawn()?
+        .wait()
+        .await?;
+
+    if s.success() {
+        return Ok(s);
+    }
+
+    Command::new("sudo")
+        .arg("zfs")
         .arg("snapshot")
         .arg(format!("{}@{}", dataset, name))
         .spawn()?

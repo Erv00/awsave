@@ -1,10 +1,10 @@
+use anyhow::Context;
 use aws_sdk_s3::{
-    Client,
-    error::SdkError,
-    operation::put_object::{PutObjectError, PutObjectOutput},
+    error::SdkError, operation::put_object::{PutObjectError, PutObjectOutput}, primitives::ByteStream, Client
 };
 use rand::RngCore;
 use rsa::{Oaep, RsaPublicKey, pkcs8::DecodePublicKey};
+use serde::{Serialize, Serializer};
 use sha2::Sha256;
 
 const MASTER_KEY_STR: &str = "-----BEGIN PUBLIC KEY-----
@@ -28,9 +28,16 @@ pub fn generate_key() -> ([u8; 32], [u8; 12]) {
     (key, iv)
 }
 
+fn serialize_hex<S>(v: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> where S: Serializer {
+    s.collect_str(&hex::encode(v))
+}
+
+#[derive(Serialize)]
 pub struct DecryptionInfo {
     pub filename: String,
+    #[serde(serialize_with = "serialize_hex")]
     pub hash: Vec<u8>,
+    #[serde(serialize_with = "serialize_hex")]
     pub key_iv: Vec<u8>,
 }
 
@@ -56,14 +63,15 @@ impl DecryptionInfo {
     pub async fn save_to_aws(
         &self,
         client: &Client,
-    ) -> Result<PutObjectOutput, SdkError<PutObjectError>> {
-        let b = serde_json::serialize(&self);
+    ) -> anyhow::Result<PutObjectOutput> {
+        let b = serde_json::to_string_pretty(&self)?;
+        let b = ByteStream::from(b.bytes().collect::<Vec<_>>());
         client
             .put_object()
             .bucket(crate::BUCKET)
             .key(format!("{}.key", &self.filename))
             .body(b)
             .send()
-            .await
+            .await.context("Failed to upload key")
     }
 }

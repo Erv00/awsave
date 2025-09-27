@@ -164,7 +164,10 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
                         .expect("More than max but still empty");
 
                     match res {
-                        Ok(Ok(part)) => upload_parts.push(part),
+                        Ok(Ok(part)) => {
+                            println!("Part done");
+                            upload_parts.push(part)
+                        },
                         Ok(Err(e)) => {
                             println!("ERROR, aborting");
                             running.abort_all();
@@ -202,7 +205,10 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
 
     while let Some(jh) = running.join_next().await {
         match jh {
-            Ok(Ok(part)) => upload_parts.push(part),
+            Ok(Ok(part)) => {
+                println!("Part done, {} remain", running.len());
+                upload_parts.push(part)
+            },
             Ok(Err(e)) => {
                 println!("ERROR, aborting");
                 running.abort_all();
@@ -217,6 +223,8 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
             Err(e) => todo!("Join error {}", e),
         }
     }
+
+    upload_parts.sort_by_key(|f| f.part_number.expect("part has no part number"));
 
     let completed_multipart_upload = CompletedMultipartUpload::builder()
         .set_parts(Some(upload_parts))
@@ -287,23 +295,31 @@ async fn main() -> anyhow::Result<()> {
     let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
     let client = aws_sdk_s3::Client::new(&config);
 
-    // ... make some calls with the client
     let resp = client
-        .list_buckets()
-        .bucket_region("eu-north-1")
+        .list_multipart_uploads()
+        .bucket("testbucket-paws")
         .send()
         .await;
 
+    println!("In progress uploads:");
     match resp {
         Ok(ls) => {
-            for b in ls.buckets() {
-                println!("{}", b.name().unwrap_or("unknown"));
+            for b in ls.uploads() {
+                println!("{} ({:?})", b.key().unwrap_or("unknown"), b.storage_class());
+
+                let pc = UploadConfig {
+                    key: b.key().expect("Missing key").to_string(),
+                    bucket: "testbucket-paws".to_string(),
+                    id: b.upload_id().expect("No upload id").to_string(),
+                };
+
+                abort_upload(&client, &pc).await?;
             }
         }
         Err(e) => {
             println!("Failed to get: {}", e.into_service_error());
         }
-    }
+    };
 
     let snaps = zfs::get_current_state(&client, "testbucket-paws").await?;
     println!("Current snapshots:");
