@@ -3,8 +3,7 @@ use std::path::Path;
 use anyhow::{Context, anyhow};
 use aws_sdk_s3::{
     Client,
-    error::SdkError,
-    operation::put_object::{PutObjectError, PutObjectOutput},
+    operation::put_object::PutObjectOutput,
     primitives::ByteStream,
 };
 use rand::RngCore;
@@ -12,7 +11,7 @@ use rsa::{
     Oaep, RsaPrivateKey, RsaPublicKey,
     pkcs8::{DecodePrivateKey, DecodePublicKey},
 };
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 const MASTER_KEY_STR: &str = "-----BEGIN PUBLIC KEY-----

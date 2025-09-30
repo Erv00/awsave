@@ -10,7 +10,9 @@ aws-sdk-s3 = "1.96.0"
 aws-smithy-types-convert = { version = "0.60.9", features = ["convert-chrono"] }
 chacha20 = "0.9.1"
 chrono = "0.4.42"
+colog = "1.4.0"
 hex = "0.4.3"
+log = "0.4.28"
 rand = "0.8.5"
 rsa = { version = "0.9.8", features = ["sha2"] }
 serde = { version = "1.0.227", features = ["derive"] }

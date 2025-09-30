@@ -1,6 +1,7 @@
 use anyhow::{Context, anyhow};
 use aws_sdk_s3::Client;
 use chacha20::cipher::{IvSizeUser, KeySizeUser, StreamCipher};
+use log::{debug, info, error, warn};
 use sha2::{Digest, Sha256, digest::generic_array::GenericArray};
 use tokio::io::AsyncWriteExt;
 
@@ -18,25 +19,11 @@ where
     GenericArray<u8, <C as IvSizeUser>::IvSize>: From<[u8; 12]>,
 {
     let state = crate::zfs::get_current_state(client, crate::BUCKET).await?;
-    println!(
-        "Got {} states {} {} {}",
-        state.len(),
-        state[0].dataset(),
-        ds,
-        state[0].dataset() == ds
-    );
     let mut state: Vec<Snapshot> = state.into_iter().filter(|s| s.dataset() == ds).collect();
-    println!(
-        "Got2 {} states {} {} {}",
-        state.len(),
-        state[0].dataset(),
-        ds,
-        state[0].dataset() == ds
-    );
     state.sort_by_key(|s| *s.date());
 
-    if state.len() == 0 {
-        println!("No snapshot for dataset '{ds}'");
+    if state.is_empty() {
+        error!("No snapshot for dataset '{ds}'");
         return Err(anyhow::anyhow!("No snapshot data"));
     }
 
@@ -58,23 +45,23 @@ where
             None => panic!("{} has unknown availability", s.aws_key()),
             Some(AvailabilityInfo::CanRestore) => {
                 abort = true;
-                println!("{} needs to be restored", s.aws_key());
+                warn!("{} needs to be restored", s.aws_key());
             }
             Some(AvailabilityInfo::RestoreInProgress) => {
                 abort = true;
-                println!("{} is still restoring, be patient", s.aws_key());
+                warn!("{} is still restoring, be patient", s.aws_key());
             }
             Some(AvailabilityInfo::Available) => (),
         }
     }
 
     if abort {
-        println!("Not all data is available, terminating");
+        error!("Not all data is available, terminating");
         return Err(anyhow::anyhow!("Not all data is available"));
     }
 
     // TODO: Confirm
-    println!("About to download {} chunks", needed.len());
+    info!("About to download {} chunks", needed.len());
 
     for s in needed {
         let res = client
@@ -111,7 +98,7 @@ where
             cipher.apply_keystream(&mut bytes);
             hasher.update(&bytes);
             p.write_all(&bytes).await?;
-            println!("Consumed {} bytes", bytes.len())
+            debug!("Consumed {} bytes", bytes.len())
         }
 
         let hash = hasher.finalize().to_vec();
@@ -129,10 +116,10 @@ where
             ));
         }
 
-        println!("Succesfully restored {}", &key.filename);
+        info!("Succesfully restored {}", &key.filename);
     }
 
-    println!("SUCCESS!\nAll data restored!");
+    info!("SUCCESS! All data restored!");
 
     Ok(())
 }

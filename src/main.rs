@@ -15,6 +15,10 @@ use aws_sdk_s3::{
 };
 
 use chacha20::cipher::StreamCipher;
+use log::debug;
+use log::error;
+use log::info;
+use log::warn;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncBufReadExt;
 use tokio::task::JoinSet;
@@ -109,7 +113,7 @@ async fn abort_upload(
     client: &Client,
     pc: &UploadConfig,
 ) -> Result<AbortMultipartUploadOutput, SdkError<AbortMultipartUploadError>> {
-    println!("ABORTING UPLOAD");
+    warn!("ABORTING UPLOAD");
     let r = client
         .abort_multipart_upload()
         .bucket(&pc.bucket)
@@ -118,7 +122,7 @@ async fn abort_upload(
         .send()
         .await;
     if r.is_err() {
-        println!("ABORTING FAILED, {:#?}", pc);
+        error!("ABORTING FAILED, {:#?}", pc);
     }
 
     r
@@ -130,8 +134,7 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
     mut source: R,
     mut cipher: C,
 ) -> anyhow::Result<Vec<u8>> {
-    let mut buffer = Vec::with_capacity(UPLOAD_CHUNK_SIZE);
-    buffer.resize(UPLOAD_CHUNK_SIZE, 0);
+    let mut buffer = vec![0; UPLOAD_CHUNK_SIZE];
     let mut hasher = Sha256::new();
     let mut upload_parts = Vec::new();
     let mut part_number = 1;
@@ -148,13 +151,13 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
                 break;
             }
             Ok(n) => {
-                println!("Read {} bytes", n);
+                debug!("Read {} bytes", n);
                 let mut chunk = buffer[..n].to_vec();
                 hasher.update(&chunk);
                 cipher.apply_keystream(&mut chunk);
 
                 total += n;
-                println!(
+                info!(
                     "Queued chunk #{}, size was {}, total {} MiB, running {}",
                     part_number,
                     n,
@@ -169,7 +172,7 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
                     part_number,
                 ));
 
-                part_number = part_number + 1;
+                part_number += 1;
 
                 if running.len() > MAX_CONCURRENT {
                     let res = running
@@ -179,11 +182,11 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
 
                     match res {
                         Ok(Ok(part)) => {
-                            println!("Part done");
+                            info!("Part done");
                             upload_parts.push(part)
                         }
                         Ok(Err(e)) => {
-                            println!("ERROR, aborting");
+                            error!("ERROR, aborting");
                             running.abort_all();
                             if let Err(ie) = abort_upload(&client, &pc).await {
                                 return Err(ie)
@@ -198,7 +201,7 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
                 }
             }
             Err(e) => {
-                println!("ERROR, aborting");
+                error!("ERROR, aborting");
                 running.abort_all();
                 if let Err(ie) = abort_upload(&client, &pc).await {
                     return Err(ie)
@@ -213,18 +216,18 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
 
     // All done
     if total == 0 {
-        println!("Read 0 bytes");
+        error!("Read 0 bytes");
         return Err(anyhow!("Read 0 bytes"));
     }
 
     while let Some(jh) = running.join_next().await {
         match jh {
             Ok(Ok(part)) => {
-                println!("Part done, {} remain", running.len());
+                info!("Part done, {} remain", running.len());
                 upload_parts.push(part)
             }
             Ok(Err(e)) => {
-                println!("ERROR, aborting");
+                error!("ERROR, aborting");
                 running.abort_all();
                 if let Err(ie) = abort_upload(&client, &pc).await {
                     return Err(ie)
@@ -255,7 +258,7 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
     if let Err(e) = cmu {
         if let Err(ie) = abort_upload(&client, &pc).await {
             return Err(ie)
-                .context(format!("Failed to finalize upload"))
+                .context("Failed to finalize upload")
                 .context(e);
         } else {
             return Err(e.into());
@@ -306,11 +309,12 @@ async fn upload_part(
 
 #[::tokio::main]
 async fn main() -> anyhow::Result<()> {
+    colog::init();
     let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
     let client = aws_sdk_s3::Client::new(&config);
 
-    load::full_recover::<chacha20::ChaCha20>(&client, "zpool/testme").await?;
-    return Ok(());
+    //load::full_recover::<chacha20::ChaCha20>(&client, "zpool/testme").await?;
+    //return Ok(());
 
     let resp = client
         .list_multipart_uploads()
@@ -318,11 +322,11 @@ async fn main() -> anyhow::Result<()> {
         .send()
         .await;
 
-    println!("In progress uploads:");
+    info!("In progress uploads:");
     match resp {
         Ok(ls) => {
             for b in ls.uploads() {
-                println!("{} ({:?})", b.key().unwrap_or("unknown"), b.storage_class());
+                info!("{} ({:?})", b.key().unwrap_or("unknown"), b.storage_class());
 
                 let pc = UploadConfig {
                     key: b.key().expect("Missing key").to_string(),
@@ -334,24 +338,21 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("Failed to get: {}", e.into_service_error());
+            error!("Failed to get: {}", e.into_service_error());
         }
     };
 
     let snaps = zfs::get_current_state(&client, "testbucket-paws").await?;
-    println!("Current snapshots:");
-    for s in snaps {
-        println!("{}", s);
-    }
-    println!("That's all");
+    let snaps_s: Vec<String> = snaps.iter().map(|s| s.to_string()).collect();
+    debug!("Current snapshots:\n{}", snaps_s.join("\n"));
 
     let now = chrono::Utc::now();
 
     let state = zfs::get_current_state(&client, BUCKET).await?;
-    let actions = zfs::check_state(&vec!["zpool/testme"], &state, now);
+    let actions = zfs::check_state(&["zpool/testme"], &state, now);
 
-    if actions.len() == 0 {
-        println!("Nothing to do!");
+    if actions.is_empty() {
+        info!("Nothing to do!");
     }
 
     for act in actions {
@@ -365,7 +366,7 @@ async fn main() -> anyhow::Result<()> {
                     .context("Uploaded backup, but key could not be encrypted")?;
                 di.save_to_aws(&client).await.with_context(|| format!("Uploaded backup. but key could not be uploaded. Filename: {}, hash: {}, keyiv: {}", &di.filename, hex::encode(&di.hash), hex::encode(&di.key_iv)))?;
 
-                println!(
+                info!(
                     "Upload of {} succesfull, hash is {}, key_iv is {}",
                     di.filename,
                     hex::encode(&di.hash),
@@ -375,7 +376,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    println!("Cleaning up...");
+    info!("Cleaning up...");
 
     let resp = client
         .list_multipart_uploads()
@@ -383,12 +384,9 @@ async fn main() -> anyhow::Result<()> {
         .send()
         .await;
 
-    println!("In progress uploads:");
     match resp {
         Ok(ls) => {
             for b in ls.uploads() {
-                println!("{} ({:?})", b.key().unwrap_or("unknown"), b.storage_class());
-
                 let pc = UploadConfig {
                     key: b.key().expect("Missing key").to_string(),
                     bucket: "testbucket-paws".to_string(),
@@ -399,7 +397,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Err(e) => {
-            println!("Failed to get: {}", e.into_service_error());
+            error!("Failed to get: {}", e.into_service_error());
         }
     };
 

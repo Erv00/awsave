@@ -14,6 +14,7 @@ use chacha20::cipher::KeyIvInit;
 use chrono::TimeDelta;
 
 use anyhow::anyhow;
+use log::error;
 use tokio::process::Command;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -248,7 +249,7 @@ impl Action {
         let snapname = now.format("%Y%m%d").to_string();
 
         // Make snapshot
-        if !take_snapshot(&ds, &snapname).await?.success() {
+        if !take_snapshot(ds, &snapname).await?.success() {
             return Err(anyhow!("Failed to make snapshot"));
         }
 
@@ -301,7 +302,7 @@ impl Action {
         let snapname = now.format("%Y%m%d").to_string();
 
         // Make snapshot
-        if !take_snapshot(&ds, &snapname).await?.success() {
+        if !take_snapshot(ds, &snapname).await?.success() {
             return Err(anyhow!("Failed to make snapshot"));
         }
 
@@ -321,7 +322,7 @@ impl Action {
             id: "asd001".to_string(),
         };
 
-        let c = crate::open_incremental(&ds, from, &snapname)?;
+        let c = crate::open_incremental(ds, from, &snapname)?;
 
         let o = c.stdout.expect("No child output stream");
 
@@ -383,10 +384,8 @@ pub fn check_state(desired_datasets: &[&str], state: &[Snapshot], now: UtcDateti
     // If desired datasets MUST have a (possibly incremental) copy that is less than a week old
     let mut latest: HashMap<&str, &Snapshot> = HashMap::new();
     for s in state {
-        if let Some(t) = latest.get(s.dataset()) {
-            if t.date() > s.date() {
-                continue;
-            }
+        if let Some(t) = latest.get(s.dataset()) && t.date() > s.date() {
+            continue;
         }
         latest.insert(s.dataset(), s);
     }
@@ -432,7 +431,7 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
         .await?;
 
     if let Some(true) = objs.is_truncated() {
-        println!("Too many objects returned");
+        error!("Too many objects returned");
     }
 
     Ok(objs
