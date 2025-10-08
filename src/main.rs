@@ -1,3 +1,4 @@
+use std::{env, fs, os};
 use std::{io, process::Stdio};
 
 use anyhow::Context;
@@ -19,6 +20,7 @@ use log::debug;
 use log::error;
 use log::info;
 use log::warn;
+use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncBufReadExt;
 use tokio::task::JoinSet;
@@ -27,13 +29,17 @@ use tokio::{
     process::Command,
 };
 
+mod config;
 mod kex;
 mod load;
 mod zfs;
 
-const UPLOAD_CHUNK_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
-const MAX_CONCURRENT: usize = 32;
-const BUCKET: &str = "testbucket-paws";
+static CONFIG: Lazy<config::Config> = Lazy::new(|| {
+    let cnf = fs::read_to_string(env::var("AWSAVE_CONFIG").unwrap_or("./config.toml".to_string()))
+        .expect("Failed to read config");
+
+    toml::from_str(&cnf).expect("Invalid config")
+});
 
 fn open_full(dataset: &str, snapshot: &str) -> Result<tokio::process::Child, io::Error> {
     Command::new("sudo")
@@ -134,7 +140,7 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
     mut source: R,
     mut cipher: C,
 ) -> anyhow::Result<Vec<u8>> {
-    let mut buffer = vec![0; UPLOAD_CHUNK_SIZE];
+    let mut buffer = vec![0; CONFIG.upload_chunk_size];
     let mut hasher = Sha256::new();
     let mut upload_parts = Vec::new();
     let mut part_number = 1;
@@ -174,7 +180,7 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
 
                 part_number += 1;
 
-                if running.len() > MAX_CONCURRENT {
+                if running.len() > CONFIG.max_concurrent {
                     let res = running
                         .join_next()
                         .await
@@ -257,9 +263,7 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
         .await;
     if let Err(e) = cmu {
         if let Err(ie) = abort_upload(&client, &pc).await {
-            return Err(ie)
-                .context("Failed to finalize upload")
-                .context(e);
+            return Err(ie).context("Failed to finalize upload").context(e);
         } else {
             return Err(e.into());
         }
@@ -313,12 +317,14 @@ async fn main() -> anyhow::Result<()> {
     let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
     let client = aws_sdk_s3::Client::new(&config);
 
+    let desired_datasets: Vec<&str> = CONFIG.desired_datasets.iter().map(|s| s.as_str()).collect();
+
     //load::full_recover::<chacha20::ChaCha20>(&client, "zpool/testme").await?;
     //return Ok(());
 
     let resp = client
         .list_multipart_uploads()
-        .bucket("testbucket-paws")
+        .bucket(&CONFIG.bucket)
         .send()
         .await;
 
@@ -330,7 +336,7 @@ async fn main() -> anyhow::Result<()> {
 
                 let pc = UploadConfig {
                     key: b.key().expect("Missing key").to_string(),
-                    bucket: "testbucket-paws".to_string(),
+                    bucket: CONFIG.bucket.clone(),
                     id: b.upload_id().expect("No upload id").to_string(),
                 };
 
@@ -342,18 +348,20 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let snaps = zfs::get_current_state(&client, "testbucket-paws").await?;
+    let snaps = zfs::get_current_state(&client, &CONFIG.bucket).await?;
     let snaps_s: Vec<String> = snaps.iter().map(|s| s.to_string()).collect();
     debug!("Current snapshots:\n{}", snaps_s.join("\n"));
 
     let now = chrono::Utc::now();
 
-    let state = zfs::get_current_state(&client, BUCKET).await?;
-    let actions = zfs::check_state(&["zpool/testme"], &state, now);
+    let state = zfs::get_current_state(&client, &CONFIG.bucket).await?;
+    let actions = zfs::check_state(&desired_datasets, &state, now);
 
     if actions.is_empty() {
         info!("Nothing to do!");
     }
+
+    return Ok(());
 
     for act in actions {
         let res = act.perform_aws(&client).await?;
@@ -380,7 +388,7 @@ async fn main() -> anyhow::Result<()> {
 
     let resp = client
         .list_multipart_uploads()
-        .bucket("testbucket-paws")
+        .bucket(&CONFIG.bucket)
         .send()
         .await;
 
@@ -389,7 +397,7 @@ async fn main() -> anyhow::Result<()> {
             for b in ls.uploads() {
                 let pc = UploadConfig {
                     key: b.key().expect("Missing key").to_string(),
-                    bucket: "testbucket-paws".to_string(),
+                    bucket: CONFIG.bucket.clone(),
                     id: b.upload_id().expect("No upload id").to_string(),
                 };
 

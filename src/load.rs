@@ -1,7 +1,7 @@
 use anyhow::{Context, anyhow};
 use aws_sdk_s3::Client;
 use chacha20::cipher::{IvSizeUser, KeySizeUser, StreamCipher};
-use log::{debug, info, error, warn};
+use log::{debug, error, info, warn};
 use sha2::{Digest, Sha256, digest::generic_array::GenericArray};
 use tokio::io::AsyncWriteExt;
 
@@ -18,7 +18,7 @@ where
     GenericArray<u8, <C as KeySizeUser>::KeySize>: From<[u8; 32]>,
     GenericArray<u8, <C as IvSizeUser>::IvSize>: From<[u8; 12]>,
 {
-    let state = crate::zfs::get_current_state(client, crate::BUCKET).await?;
+    let state = crate::zfs::get_current_state(client, &crate::CONFIG.bucket).await?;
     let mut state: Vec<Snapshot> = state.into_iter().filter(|s| s.dataset() == ds).collect();
     state.sort_by_key(|s| *s.date());
 
@@ -66,7 +66,7 @@ where
     for s in needed {
         let res = client
             .get_object()
-            .bucket(crate::BUCKET)
+            .bucket(&crate::CONFIG.bucket)
             .key(format!("{}.key", s.aws_key()))
             .send()
             .await?;
@@ -78,7 +78,7 @@ where
         let mut hasher = Sha256::new();
         let mut res = client
             .get_object()
-            .bucket(crate::BUCKET)
+            .bucket(&crate::CONFIG.bucket)
             .key(s.aws_key())
             .send()
             .await?;

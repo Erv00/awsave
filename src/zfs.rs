@@ -239,7 +239,7 @@ impl Action {
     > {
         client
             .delete_object()
-            .bucket(crate::BUCKET)
+            .bucket(&crate::CONFIG.bucket)
             .key(s.aws_key())
             .send()
     }
@@ -257,7 +257,7 @@ impl Action {
 
         let mut pc = UploadConfig {
             key: Snapshot::Full(snap).aws_key(),
-            bucket: crate::BUCKET.to_string(),
+            bucket: crate::CONFIG.bucket.clone(),
             id: "asd001".to_string(),
         };
 
@@ -318,7 +318,7 @@ impl Action {
 
         let mut pc = UploadConfig {
             key: Snapshot::Incremental(snap).aws_key(),
-            bucket: crate::BUCKET.to_string(),
+            bucket: crate::CONFIG.bucket.clone(),
             id: "asd001".to_string(),
         };
 
@@ -384,7 +384,9 @@ pub fn check_state(desired_datasets: &[&str], state: &[Snapshot], now: UtcDateti
     // If desired datasets MUST have a (possibly incremental) copy that is less than a week old
     let mut latest: HashMap<&str, &Snapshot> = HashMap::new();
     for s in state {
-        if let Some(t) = latest.get(s.dataset()) && t.date() > s.date() {
+        if let Some(t) = latest.get(s.dataset())
+            && t.date() > s.date()
+        {
             continue;
         }
         latest.insert(s.dataset(), s);
