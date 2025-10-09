@@ -139,8 +139,16 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
     pc: UploadConfig,
     mut source: R,
     mut cipher: C,
+    expected_size: usize
 ) -> anyhow::Result<Vec<u8>> {
-    let mut buffer = vec![0; CONFIG.upload_chunk_size];
+    let readsize = if (expected_size / CONFIG.upload_chunk_size)+200 >= 10000 {
+        // Chunks too small
+        info!("Chunks are too small, using {} instead", expected_size / (10000-200));
+        expected_size / (10000-200)
+    } else {
+        CONFIG.upload_chunk_size
+    };
+    let mut buffer = vec![0; readsize];
     let mut hasher = Sha256::new();
     let mut upload_parts = Vec::new();
     let mut part_number = 1;
@@ -150,7 +158,6 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
 
     loop {
         let r = read_exact_noerr(&mut source, &mut buffer).await;
-
         match r {
             Ok(0) => {
                 // Read all data
@@ -164,11 +171,11 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
 
                 total += n;
                 info!(
-                    "Queued chunk #{}, size was {}, total {} MiB, running {}",
+                    "Queued chunk #{}, size was {}, total {} MiB, {} %",
                     part_number,
                     n,
                     total / 1024 / 1024,
-                    running.len()
+                    total as f32 / expected_size as f32 * 100.0
                 );
 
                 running.spawn(upload_part_outer(
@@ -188,7 +195,7 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
 
                     match res {
                         Ok(Ok(part)) => {
-                            info!("Part done");
+                            debug!("Part done");
                             upload_parts.push(part)
                         }
                         Ok(Err(e)) => {
@@ -229,7 +236,7 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
     while let Some(jh) = running.join_next().await {
         match jh {
             Ok(Ok(part)) => {
-                info!("Part done, {} remain", running.len());
+                info!("Part done, {} remaining", running.len());
                 upload_parts.push(part)
             }
             Ok(Err(e)) => {
@@ -360,8 +367,6 @@ async fn main() -> anyhow::Result<()> {
     if actions.is_empty() {
         info!("Nothing to do!");
     }
-
-    return Ok(());
 
     for act in actions {
         let res = act.perform_aws(&client).await?;

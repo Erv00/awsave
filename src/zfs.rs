@@ -1,7 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
-    fmt::{self, Write},
-    process::ExitStatus,
+    collections::{HashMap, HashSet}, fmt::{self, Write}, io::BufRead, process::ExitStatus
 };
 
 use aws_sdk_s3::{
@@ -189,6 +187,74 @@ impl Snapshot {
 
         Some(AvailabilityInfo::from((ty, stat)))
     }
+
+    pub fn size(&self) -> &Option<usize> {
+         match self {
+            Snapshot::Full(full_snapshot) => &full_snapshot.size,
+            Snapshot::Incremental(incremental_snapshot) => &incremental_snapshot.size,
+        }
+    }
+
+    pub async fn take_full(dataset: &str, name: &str) -> anyhow::Result<Self> {
+        let s = Command::new("sudo")
+            .arg("zfs")
+            .arg("list")
+            .arg("-t")
+            .arg("snapshot")
+            .arg(format!("{}@{}", dataset, name))
+            .spawn()?
+            .wait()
+            .await?;
+
+        if !s.success() {
+            // Did not exist
+            Command::new("sudo")
+                .arg("zfs")
+                .arg("snapshot")
+                .arg("-r")
+                .arg(format!("{}@{}", dataset, name))
+                .spawn()?
+                .wait()
+                .await?;
+        }
+
+        let s = Command::new("sudo")
+            .arg("zfs")
+            .arg("send")
+            .arg("-PnR")
+            .arg(format!("{}@{}", dataset, name))
+            .output()
+            .await?;
+
+        if !s.status.success() || s.stdout.len() == 0 {
+            return Err(anyhow!(
+                "Failed to take full snapshot {}@{}: {:?}",
+                dataset,
+                name,
+                s.status.code()
+            ));
+        }
+
+        let s = s.stdout.lines();
+        if let Some(Ok(ll)) = s.last() {
+            if let Some(size) = ll.split('\t').last() {
+                let size = usize::from_str_radix(size, 10)?;
+                
+                Ok(Self::Full(FullSnapshot {
+                    dataset: dataset.to_owned(),
+                    name: name.to_owned(),
+                    date: chrono::Utc::now(),
+                    size: Some(size),
+                    storage_class: None,
+                    restore_status: None,
+                }))
+            } else {
+                Err(anyhow!("Failed to split"))
+            }
+        } else {
+            Err(anyhow!("Empty stdout"))
+        }
+    }
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -249,14 +315,10 @@ impl Action {
         let snapname = now.format("%Y%m%d").to_string();
 
         // Make snapshot
-        if !take_snapshot(ds, &snapname).await?.success() {
-            return Err(anyhow!("Failed to make snapshot"));
-        }
-
-        let snap = FullSnapshot::new(ds.to_owned(), snapname.clone(), now, None, None, None);
+        let snap = Snapshot::take_full(ds, &snapname).await?;
 
         let mut pc = UploadConfig {
-            key: Snapshot::Full(snap).aws_key(),
+            key: snap.aws_key(),
             bucket: crate::CONFIG.bucket.clone(),
             id: "asd001".to_string(),
         };
@@ -283,7 +345,7 @@ impl Action {
         let cipher = chacha20::ChaCha20::new(&key.into(), &iv.into());
         let filename = pc.key.clone();
 
-        let hash = crate::encypt_and_upload(client.clone(), pc, o, cipher).await?;
+        let hash = crate::encypt_and_upload(client.clone(), pc, o, cipher, snap.size().unwrap()).await?;
 
         Ok(UploadResult {
             filename,
@@ -302,9 +364,9 @@ impl Action {
         let snapname = now.format("%Y%m%d").to_string();
 
         // Make snapshot
-        if !take_snapshot(ds, &snapname).await?.success() {
-            return Err(anyhow!("Failed to make snapshot"));
-        }
+        //if !take_snapshot(ds, &snapname).await?.success() {
+        //    return Err(anyhow!("Failed to make snapshot"));
+        //}
 
         let snap = IncrementalSnapshot::new(
             ds.to_owned(),
@@ -344,14 +406,15 @@ impl Action {
         let cipher = chacha20::ChaCha20::new(&key.into(), &iv.into());
         let filename = pc.key.clone();
 
-        let hash = crate::encypt_and_upload(client.clone(), pc, o, cipher).await?;
+        todo!();
+        //let hash = crate::encypt_and_upload(client.clone(), pc, o, cipher, snap.size.clo.unwrap()).await?;
 
-        Ok(UploadResult {
+        /*Ok(UploadResult {
             filename,
             hash,
             key,
             iv,
-        })
+        })*/
     }
 }
 
@@ -486,29 +549,6 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
         .collect())
 }
 
-async fn take_snapshot(dataset: &str, name: &str) -> Result<ExitStatus, std::io::Error> {
-    let s = Command::new("sudo")
-        .arg("zfs")
-        .arg("list")
-        .arg("-t")
-        .arg("snapshot")
-        .arg(format!("{}@{}", dataset, name))
-        .spawn()?
-        .wait()
-        .await?;
-
-    if s.success() {
-        return Ok(s);
-    }
-
-    Command::new("sudo")
-        .arg("zfs")
-        .arg("snapshot")
-        .arg(format!("{}@{}", dataset, name))
-        .spawn()?
-        .wait()
-        .await
-}
 
 async fn delete_snapshot(dataset: &str, name: &str) -> Result<ExitStatus, std::io::Error> {
     Command::new("zfs")
