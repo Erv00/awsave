@@ -1,6 +1,9 @@
+use std::{fmt::Write, io::IsTerminal};
+
 use anyhow::{Context, anyhow};
 use aws_sdk_s3::Client;
 use chacha20::cipher::{IvSizeUser, KeySizeUser, StreamCipher};
+use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use log::{debug, error, info, warn};
 use sha2::{Digest, Sha256, digest::generic_array::GenericArray};
 use tokio::io::AsyncWriteExt;
@@ -74,6 +77,8 @@ where
         let key: DecryptionInfo = serde_json::from_slice(&key.into_bytes())?;
         let (enckey, iv) = key.decrypt("master-key.pem")?;
 
+        info!("Decryption done, expected hash: {}", hex::encode(&key.hash));
+
         let mut cipher = C::new(&enckey.into(), &iv.into());
         let mut hasher = Sha256::new();
         let mut res = client
@@ -92,6 +97,21 @@ where
         }?;
 
         let mut p = zfs.stdin.take().unwrap();
+        let size = res.content_length;
+        let mut total = 0;
+
+        let pb = ProgressBar::new(size.unwrap_or(0) as u64);
+
+        if size.is_some() {
+            pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
+            .unwrap()
+            .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
+            .progress_chars("#>-"));
+        } else {
+            pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes} (???s) {msg}")
+            .unwrap()
+            .progress_chars("#>-"));
+        }
 
         while let Some(bytes) = res.body.try_next().await? {
             let mut bytes = bytes.to_vec();
@@ -99,6 +119,19 @@ where
             hasher.update(&bytes);
             p.write_all(&bytes).await?;
             debug!("Consumed {} bytes", bytes.len())
+            total += bytes.len();
+            if let Some(size) = size {
+                info!(
+                    "Consumed {} bytes, {} %",
+                    bytes.len(),
+                    total as f32 / size as f32 * 100.0
+                );
+            } else {
+                info!("Consumed {} bytes, ??? %", bytes.len());
+            }
+            if std::io::stderr().is_terminal() {
+                pb.set_position(total as u64);
+            }
         }
 
         let hash = hasher.finalize().to_vec();
@@ -109,6 +142,9 @@ where
         }
 
         if hash != key.hash {
+            pb.finish_with_message(format!("HASH MISMATCH expected {}, got {}",
+                hex::encode(&key.hash),
+                hex::encode(&hash)));
             return Err(anyhow!(
                 "HASH MISMATCH expected {}, got {}",
                 hex::encode(&key.hash),
@@ -116,6 +152,7 @@ where
             ));
         }
 
+        pb.finish_with_message(format!("Succesfully restored {}", &key.filename));
         info!("Succesfully restored {}", &key.filename);
     }
 
