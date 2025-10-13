@@ -1,12 +1,12 @@
-use std::{fmt::Write, io::IsTerminal};
+use std::fmt::Write;
 
 use anyhow::{Context, anyhow};
 use aws_sdk_s3::Client;
 use chacha20::cipher::{IvSizeUser, KeySizeUser, StreamCipher};
-use indicatif::{ProgressBar, ProgressState, ProgressStyle};
-use log::{debug, error, info, warn};
+use dialoguer::{theme::ColorfulTheme, Confirm};
+use indicatif::{HumanBytes, HumanCount, ProgressBar, ProgressState, ProgressStyle};
+use log::{error, info, warn};
 use sha2::{Digest, Sha256, digest::generic_array::GenericArray};
-use tokio::io::AsyncWriteExt;
 
 use crate::{
     kex::DecryptionInfo,
@@ -63,8 +63,16 @@ where
         return Err(anyhow::anyhow!("Not all data is available"));
     }
 
-    // TODO: Confirm
-    info!("About to download {} chunks", needed.len());
+    let total_size = needed.iter().fold(0, |acc, x| acc + x.size().unwrap_or(0));
+
+    // Confirm
+    if !Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("About to download {} snapshots, {} total, continue?", HumanCount(needed.len() as u64), HumanBytes(total_size as u64)))
+        .default(true)
+        .interact()?
+        {
+            return Ok(());
+        }
 
     for s in needed {
         let res = client
@@ -103,13 +111,11 @@ where
         let pb = ProgressBar::new(size.unwrap_or(0) as u64);
 
         if size.is_some() {
-            pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
-            .unwrap()
+            pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")?
             .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
             .progress_chars("#>-"));
         } else {
-            pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes} (???s) {msg}")
-            .unwrap()
+            pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {bytes} (???s) {msg}")?
             .progress_chars("#>-"));
         }
 
@@ -120,18 +126,7 @@ where
             p.write_all(&bytes).await?;
             debug!("Consumed {} bytes", bytes.len())
             total += bytes.len();
-            if let Some(size) = size {
-                info!(
-                    "Consumed {} bytes, {} %",
-                    bytes.len(),
-                    total as f32 / size as f32 * 100.0
-                );
-            } else {
-                info!("Consumed {} bytes, ??? %", bytes.len());
-            }
-            if std::io::stderr().is_terminal() {
-                pb.set_position(total as u64);
-            }
+            pb.set_position(total as u64);
         }
 
         let hash = hasher.finalize().to_vec();
@@ -152,8 +147,8 @@ where
             ));
         }
 
-        pb.finish_with_message(format!("Succesfully restored {}", &key.filename));
-        info!("Succesfully restored {}", &key.filename);
+        pb.finish_with_message(format!("Successfully restored {}", &key.filename));
+        info!("Successfully restored {}", &key.filename);
     }
 
     info!("SUCCESS! All data restored!");
