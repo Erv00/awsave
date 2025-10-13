@@ -21,6 +21,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::UploadConfig;
 
+pub mod snaplist;
+
 const SNAPSHOT_PREFIX: &str = "AWSAVE-";
 
 type UtcDatetime = chrono::DateTime<chrono::Utc>;
@@ -381,7 +383,6 @@ impl Action {
         }
     }
 
-    // TODO: Fix this
     async fn perform_aws_delete(
         s: &Snapshot,
         client: &Client,
@@ -625,7 +626,7 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
         .collect())
 }
 
-async fn delete_snapshot(dataset: &str, name: &str) -> Result<ExitStatus, std::io::Error> {
+pub async fn delete_snapshot(dataset: &str, name: &str) -> Result<ExitStatus, std::io::Error> {
     Command::new("zfs")
         .arg("destroy")
         .arg(format!("{}@{}", dataset, name))

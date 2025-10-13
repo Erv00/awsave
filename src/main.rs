@@ -17,8 +17,9 @@ use std::{env, fs};
 use std::{io, process::Stdio};
 
 use crate::zfs::Action;
+use crate::zfs::snaplist::ZfsSnapshotListEntry;
 use chacha20::cipher::StreamCipher;
-use chrono::TimeDelta;
+use chrono::{Days, TimeDelta, Utc};
 use dialoguer::Confirm;
 use dialoguer::theme::ColorfulTheme;
 use log::debug;
@@ -430,6 +431,30 @@ async fn main() -> anyhow::Result<()> {
             error!("Failed to get: {}", e.into_service_error());
         }
     };
+
+    info!("Deleting outdated snapshots...");
+    let localsnaps = zfs::snaplist::get_all_local_snapshots().await?;
+    info!(
+        "Local snapshots:\n{}",
+        localsnaps
+            .iter()
+            .map(ZfsSnapshotListEntry::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let outdated_time = Utc::now()
+        .checked_sub_days(Days::new(190))
+        .expect("Failed to go back 190 days");
+    let outdated = localsnaps
+        .into_iter()
+        .filter(|s| s.creation_date < outdated_time);
+
+    for s in outdated {
+        info!("Deleting snapshot {}", s);
+        zfs::delete_snapshot(&s.dataset, &s.snapshot_name).await?;
+    }
+
+    info!("Done");
 
     Ok(())
 }
