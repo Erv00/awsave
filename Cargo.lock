@@ -562,6 +562,7 @@ dependencies = [
  "dialoguer",
  "hex",
  "indicatif",
+ "indicatif-log-bridge",
  "log",
  "once_cell",
  "rand 0.8.5",
@@ -570,7 +571,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
- "tokio-stream",
  "toml",
  "zeroize",
 ]
@@ -1596,6 +1596,16 @@ dependencies = [
  "unicode-width",
  "unit-prefix",
  "web-time",
+]
+
+[[package]]
+name = "indicatif-log-bridge"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63703cf9069b85dbe6fe26e1c5230d013dee99d3559cd3d02ba39e099ef7ab02"
+dependencies = [
+ "indicatif",
+ "log",
 ]
 
 [[package]]
@@ -2753,17 +2763,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e727b36a1a0e8b74c376ac2211e40c2c8af09fb4013c60d910495810f008e9b"
 dependencies = [
  "rustls 0.23.31",
- "tokio",
-]
-
-[[package]]
-name = "tokio-stream"
-version = "0.1.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eca58d7bba4a75707817a2c44174253f9236b2d5fbd055602e9d5c07c139a047"
-dependencies = [
- "futures-core",
- "pin-project-lite",
  "tokio",
 ]
 

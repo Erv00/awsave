@@ -1,11 +1,12 @@
+use std::collections::HashSet;
 use std::fmt::Write;
 
 use anyhow::{Context, anyhow};
 use aws_sdk_s3::Client;
 use chacha20::cipher::{IvSizeUser, KeySizeUser, StreamCipher};
-use dialoguer::{theme::ColorfulTheme, Confirm};
-use indicatif::{HumanBytes, HumanCount, ProgressBar, ProgressState, ProgressStyle};
-use log::{error, info, warn};
+use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect};
+use indicatif::{HumanBytes, HumanCount, MultiProgress, ProgressBar, ProgressState, ProgressStyle};
+use log::{error, warn};
 use sha2::{Digest, Sha256, digest::generic_array::GenericArray};
 
 use crate::{
@@ -13,9 +14,53 @@ use crate::{
     zfs::{AvailabilityInfo, Snapshot},
 };
 
-pub async fn full_recover<C: StreamCipher + chacha20::cipher::KeyIvInit>(
+pub async fn full_recover_all<C: StreamCipher + chacha20::cipher::KeyIvInit>(
+    client: &Client,
+) -> anyhow::Result<()>
+where
+    GenericArray<u8, <C as KeySizeUser>::KeySize>: From<[u8; 32]>,
+    GenericArray<u8, <C as IvSizeUser>::IvSize>: From<[u8; 12]>,
+{
+    let state = crate::zfs::get_current_state(client, &crate::CONFIG.bucket).await?;
+    let mut available_datasets = HashSet::new();
+
+    for snap in state {
+        available_datasets.insert(snap.dataset().to_owned());
+    }
+
+    let available_datasets: Vec<String> = available_datasets.into_iter().collect();
+
+    let desired_datasets = MultiSelect::with_theme(&ColorfulTheme::default())
+        .with_prompt("Which datasets to recover?")
+        .items_checked(available_datasets.iter().map(|v| (v, true)))
+        .interact()?;
+
+    if desired_datasets.is_empty() {
+        return Ok(());
+    }
+
+    let mp = MultiProgress::new();
+    let pb = mp.add(ProgressBar::new(desired_datasets.len() as u64));
+    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} {msg}")?);
+    pb.set_position(0);
+
+    for desired_dataset in desired_datasets {
+        let ds = &available_datasets[desired_dataset];
+
+        full_recover_one::<C>(client, ds, Some(&mp)).await?;
+        pb.inc(1);
+    }
+
+    pb.finish_with_message("All dataset recovered");
+
+    Ok(())
+}
+
+
+pub async fn full_recover_one<C: StreamCipher + chacha20::cipher::KeyIvInit>(
     client: &Client,
     ds: &str,
+    bars: Option<&MultiProgress>,
 ) -> anyhow::Result<()>
 where
     GenericArray<u8, <C as KeySizeUser>::KeySize>: From<[u8; 32]>,
@@ -66,7 +111,7 @@ where
     let total_size = needed.iter().fold(0, |acc, x| acc + x.size().unwrap_or(0));
 
     // Confirm
-    if !Confirm::with_theme(&ColorfulTheme::default())
+    if bars.is_none() && !Confirm::with_theme(&ColorfulTheme::default())
         .with_prompt(format!("About to download {} snapshots, {} total, continue?", HumanCount(needed.len() as u64), HumanBytes(total_size as u64)))
         .default(true)
         .interact()?
@@ -85,7 +130,7 @@ where
         let key: DecryptionInfo = serde_json::from_slice(&key.into_bytes())?;
         let (enckey, iv) = key.decrypt("master-key.pem")?;
 
-        info!("Decryption done, expected hash: {}", hex::encode(&key.hash));
+        //info!("Decryption done, expected hash: {}", hex::encode(&key.hash));
 
         let mut cipher = C::new(&enckey.into(), &iv.into());
         let mut hasher = Sha256::new();
@@ -108,7 +153,11 @@ where
         let size = res.content_length;
         let mut total = 0;
 
-        let pb = ProgressBar::new(size.unwrap_or(0) as u64);
+        let pb = if let Some(bars) = bars {
+            bars.add(ProgressBar::new(size.unwrap_or(0) as u64))
+        } else {
+            ProgressBar::new(size.unwrap_or(0) as u64)
+        };
 
         if size.is_some() {
             pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")?
@@ -148,10 +197,10 @@ where
         }
 
         pb.finish_with_message(format!("Successfully restored {}", &key.filename));
-        info!("Successfully restored {}", &key.filename);
+        //info!("Successfully restored {}", &key.filename);
     }
 
-    info!("SUCCESS! All data restored!");
+    //info!("SUCCESS! All data restored!");
 
     Ok(())
 }

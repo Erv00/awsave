@@ -226,7 +226,7 @@ impl Snapshot {
             .output()
             .await?;
 
-        if !s.status.success() || s.stdout.len() == 0 {
+        if !s.status.success() || s.stdout.is_empty() {
             return Err(anyhow!(
                 "Failed to take full snapshot {}@{}: {:?}",
                 dataset,
@@ -237,8 +237,8 @@ impl Snapshot {
 
         let s = s.stdout.lines();
         if let Some(Ok(ll)) = s.last() {
-            if let Some(size) = ll.split('\t').last() {
-                let size = usize::from_str_radix(size, 10)?;
+            if let Some(size) = ll.split('\t').next_back() {
+                let size = size.parse()?;
                 
                 Ok(Self::Full(FullSnapshot {
                     dataset: dataset.to_owned(),
@@ -310,7 +310,7 @@ impl Action {
             .send()
     }
 
-    async fn perform_aws_create_full(ds: &String, client: &Client) -> anyhow::Result<UploadResult> {
+    async fn perform_aws_create_full(ds: &str, client: &Client) -> anyhow::Result<UploadResult> {
         let now = chrono::Utc::now();
         let snapname = now.format("%Y%m%d").to_string();
 
@@ -345,7 +345,7 @@ impl Action {
         let cipher = chacha20::ChaCha20::new(&key.into(), &iv.into());
         let filename = pc.key.clone();
 
-        let hash = crate::encypt_and_upload(client.clone(), pc, o, cipher, snap.size().unwrap()).await?;
+        let hash = crate::encrypt_and_upload(client.clone(), pc, o, cipher, snap.size().unwrap()).await?;
 
         Ok(UploadResult {
             filename,
@@ -518,7 +518,7 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
                 .expect("AWS lied to me, key does not start with prefix");
             let parts: Vec<&str> = name.split('@').collect();
 
-            let snap_type = parts.get(0)?;
+            let snap_type = parts.first()?;
             let dataset = parts.get(1)?;
             let name = parts.get(2)?;
 

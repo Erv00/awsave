@@ -1,4 +1,4 @@
-use std::{env, fs, os};
+use std::{env, fs};
 use std::{io, process::Stdio};
 
 use anyhow::Context;
@@ -134,7 +134,7 @@ async fn abort_upload(
     r
 }
 
-async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
+async fn encrypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
     client: Client,
     pc: UploadConfig,
     mut source: R,
@@ -201,12 +201,12 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
                         Ok(Err(e)) => {
                             error!("ERROR, aborting");
                             running.abort_all();
-                            if let Err(ie) = abort_upload(&client, &pc).await {
-                                return Err(ie)
+                            return if let Err(ie) = abort_upload(&client, &pc).await {
+                                Err(ie)
                                     .context(format!("Failed to upload part #{}", part_number))
-                                    .context(e);
+                                    .context(e)
                             } else {
-                                return Err(e.into());
+                                Err(e.into())
                             }
                         }
                         Err(e) => todo!("Join error {}", e),
@@ -216,12 +216,12 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
             Err(e) => {
                 error!("ERROR, aborting");
                 running.abort_all();
-                if let Err(ie) = abort_upload(&client, &pc).await {
-                    return Err(ie)
+                return if let Err(ie) = abort_upload(&client, &pc).await {
+                    Err(ie)
                         .context(format!("Failed to read part #{}", part_number))
-                        .context(e);
+                        .context(e)
                 } else {
-                    return Err(e.into());
+                    Err(e.into())
                 }
             }
         }
@@ -242,12 +242,12 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
             Ok(Err(e)) => {
                 error!("ERROR, aborting");
                 running.abort_all();
-                if let Err(ie) = abort_upload(&client, &pc).await {
-                    return Err(ie)
+                return if let Err(ie) = abort_upload(&client, &pc).await {
+                    Err(ie)
                         .context(format!("Failed to upload part #{}", part_number))
-                        .context(e);
+                        .context(e)
                 } else {
-                    return Err(e.into());
+                    Err(e.into())
                 }
             }
             Err(e) => todo!("Join error {}", e),
@@ -269,10 +269,10 @@ async fn encypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
         .send()
         .await;
     if let Err(e) = cmu {
-        if let Err(ie) = abort_upload(&client, &pc).await {
-            return Err(ie).context("Failed to finalize upload").context(e);
+        return if let Err(ie) = abort_upload(&client, &pc).await {
+            Err(ie).context("Failed to finalize upload").context(e)
         } else {
-            return Err(e.into());
+            Err(e.into())
         }
     }
 
@@ -318,75 +318,63 @@ async fn upload_part(
         .build())
 }
 
-#[::tokio::main]
-async fn main() -> anyhow::Result<()> {
-    colog::init();
-    let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
-    let client = aws_sdk_s3::Client::new(&config);
-
-    let desired_datasets: Vec<&str> = CONFIG.desired_datasets.iter().map(|s| s.as_str()).collect();
-
-    //load::full_recover::<chacha20::ChaCha20>(&client, "zpool/testme").await?;
-    //return Ok(());
-
-    let resp = client
-        .list_multipart_uploads()
-        .bucket(&CONFIG.bucket)
-        .send()
-        .await;
-
-    info!("In progress uploads:");
-    match resp {
-        Ok(ls) => {
-            for b in ls.uploads() {
-                info!("{} ({:?})", b.key().unwrap_or("unknown"), b.storage_class());
-
-                let pc = UploadConfig {
-                    key: b.key().expect("Missing key").to_string(),
-                    bucket: CONFIG.bucket.clone(),
-                    id: b.upload_id().expect("No upload id").to_string(),
-                };
-
-                abort_upload(&client, &pc).await?;
-            }
-        }
-        Err(e) => {
-            error!("Failed to get: {}", e.into_service_error());
-        }
-    };
-
-    let snaps = zfs::get_current_state(&client, &CONFIG.bucket).await?;
+async fn ensure_consistency(client: &Client, desired_datasets: &[&str]) -> anyhow::Result<()> {
+let snaps = zfs::get_current_state(client, &CONFIG.bucket).await?;
     let snaps_s: Vec<String> = snaps.iter().map(|s| s.to_string()).collect();
     debug!("Current snapshots:\n{}", snaps_s.join("\n"));
 
     let now = chrono::Utc::now();
 
-    let state = zfs::get_current_state(&client, &CONFIG.bucket).await?;
-    let actions = zfs::check_state(&desired_datasets, &state, now);
+    let state = zfs::get_current_state(client, &CONFIG.bucket).await?;
+    let actions = zfs::check_state(desired_datasets, &state, now);
 
     if actions.is_empty() {
         info!("Nothing to do!");
     }
 
     for act in actions {
-        let res = act.perform_aws(&client).await?;
+        let res = act.perform_aws(client).await?;
 
         match res {
-            zfs::ActionPerformResult::Delete(delete_object_output) => todo!(),
+            zfs::ActionPerformResult::Delete(_delete_object_output) => todo!(),
             zfs::ActionPerformResult::CreateFull(upload_result)
             | zfs::ActionPerformResult::CreateIncremental(upload_result) => {
                 let di = kex::DecryptionInfo::encrypt(upload_result)
                     .context("Uploaded backup, but key could not be encrypted")?;
-                di.save_to_aws(&client).await.with_context(|| format!("Uploaded backup. but key could not be uploaded. Filename: {}, hash: {}, keyiv: {}", &di.filename, hex::encode(&di.hash), hex::encode(&di.key_iv)))?;
+                di.save_to_aws(client).await.with_context(|| format!("Uploaded backup. but key could not be uploaded. Filename: {}, hash: {}, keyiv: {}", &di.filename, hex::encode(&di.hash), hex::encode(&di.key_iv)))?;
 
                 info!(
-                    "Upload of {} succesfull, hash is {}, key_iv is {}",
+                    "Upload of {} successful, hash is {}, key_iv is {}",
                     di.filename,
                     hex::encode(&di.hash),
                     hex::encode(&di.key_iv)
                 );
             }
         }
+    }
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    colog::init();
+    let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
+    let client = Client::new(&config);
+
+    let desired_datasets: Vec<&str> = CONFIG.desired_datasets.iter().map(|s| s.as_str()).collect();
+
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() == 2 && args[1] == "recover" {
+        if let Err(e) = load::full_recover_all::<chacha20::ChaCha20>(&client).await {
+            error!("Error encountered while restoring: {}\n{:?}",e, e.source());
+        }
+    } else if args.len() > 1 {
+        error!("Too many arguments: {}, use \"{} recover\" to start recovery process", args.len(), args[0]);
+        return Err(anyhow::anyhow!("Too many arguments"));
+    } else if let Err(r) = ensure_consistency(&client, &desired_datasets).await {
+            error!("Error encountered while ensuring consistency: {}",r);
     }
 
     info!("Cleaning up...");
