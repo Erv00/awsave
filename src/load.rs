@@ -4,7 +4,7 @@ use std::fmt::Write;
 use anyhow::{Context, anyhow};
 use aws_sdk_s3::Client;
 use chacha20::cipher::{IvSizeUser, KeySizeUser, StreamCipher};
-use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect};
+use dialoguer::{Confirm, MultiSelect, theme::ColorfulTheme};
 use indicatif::{HumanBytes, HumanCount, MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use log::{error, warn};
 use sha2::{Digest, Sha256, digest::generic_array::GenericArray};
@@ -41,7 +41,9 @@ where
 
     let mp = MultiProgress::new();
     let pb = mp.add(ProgressBar::new(desired_datasets.len() as u64));
-    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} {msg}")?);
+    pb.set_style(ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} {msg}",
+    )?);
     pb.set_position(0);
 
     for desired_dataset in desired_datasets {
@@ -55,7 +57,6 @@ where
 
     Ok(())
 }
-
 
 pub async fn full_recover_one<C: StreamCipher + chacha20::cipher::KeyIvInit>(
     client: &Client,
@@ -111,13 +112,18 @@ where
     let total_size = needed.iter().fold(0, |acc, x| acc + x.size().unwrap_or(0));
 
     // Confirm
-    if bars.is_none() && !Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("About to download {} snapshots, {} total, continue?", HumanCount(needed.len() as u64), HumanBytes(total_size as u64)))
-        .default(true)
-        .interact()?
-        {
-            return Ok(());
-        }
+    if bars.is_none()
+        && !Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!(
+                "About to download {} snapshots, {} total, continue?",
+                HumanCount(needed.len() as u64),
+                HumanBytes(total_size as u64)
+            ))
+            .default(true)
+            .interact()?
+    {
+        return Ok(());
+    }
 
     for s in needed {
         let res = client
@@ -164,8 +170,12 @@ where
             .with_key("eta", |state: &ProgressState, w: &mut dyn Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
             .progress_chars("#>-"));
         } else {
-            pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {bytes} (???s) {msg}")?
-            .progress_chars("#>-"));
+            pb.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.green} [{elapsed_precise}] {bytes} (???s) {msg}",
+                )?
+                .progress_chars("#>-"),
+            );
         }
 
         while let Some(bytes) = res.body.try_next().await? {
@@ -186,9 +196,11 @@ where
         }
 
         if hash != key.hash {
-            pb.finish_with_message(format!("HASH MISMATCH expected {}, got {}",
+            pb.finish_with_message(format!(
+                "HASH MISMATCH expected {}, got {}",
                 hex::encode(&key.hash),
-                hex::encode(&hash)));
+                hex::encode(&hash)
+            ));
             return Err(anyhow!(
                 "HASH MISMATCH expected {}, got {}",
                 hex::encode(&key.hash),

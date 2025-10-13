@@ -1,6 +1,3 @@
-use std::{env, fs};
-use std::{io, process::Stdio};
-
 use anyhow::Context;
 use anyhow::anyhow;
 use aws_config::BehaviorVersion;
@@ -14,8 +11,16 @@ use aws_sdk_s3::{
     primitives::ByteStream,
     types::{CompletedMultipartUpload, CompletedPart},
 };
+use std::io::IsTerminal;
+use std::ops::Add;
+use std::{env, fs};
+use std::{io, process::Stdio};
 
+use crate::zfs::Action;
 use chacha20::cipher::StreamCipher;
+use chrono::TimeDelta;
+use dialoguer::Confirm;
+use dialoguer::theme::ColorfulTheme;
 use log::debug;
 use log::error;
 use log::info;
@@ -139,12 +144,15 @@ async fn encrypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
     pc: UploadConfig,
     mut source: R,
     mut cipher: C,
-    expected_size: usize
+    expected_size: usize,
 ) -> anyhow::Result<Vec<u8>> {
-    let readsize = if (expected_size / CONFIG.upload_chunk_size)+200 >= 10000 {
+    let readsize = if (expected_size / CONFIG.upload_chunk_size) + 200 >= 10000 {
         // Chunks too small
-        info!("Chunks are too small, using {} instead", expected_size / (10000-200));
-        expected_size / (10000-200)
+        info!(
+            "Chunks are too small, using {} instead",
+            expected_size / (10000 - 200)
+        );
+        expected_size / (10000 - 200)
     } else {
         CONFIG.upload_chunk_size
     };
@@ -207,7 +215,7 @@ async fn encrypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
                                     .context(e)
                             } else {
                                 Err(e.into())
-                            }
+                            };
                         }
                         Err(e) => todo!("Join error {}", e),
                     }
@@ -222,7 +230,7 @@ async fn encrypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
                         .context(e)
                 } else {
                     Err(e.into())
-                }
+                };
             }
         }
     }
@@ -248,7 +256,7 @@ async fn encrypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
                         .context(e)
                 } else {
                     Err(e.into())
-                }
+                };
             }
             Err(e) => todo!("Join error {}", e),
         }
@@ -273,7 +281,7 @@ async fn encrypt_and_upload<R: AsyncReadExt + Unpin, C: StreamCipher>(
             Err(ie).context("Failed to finalize upload").context(e)
         } else {
             Err(e.into())
-        }
+        };
     }
 
     Ok(hasher.finalize().to_vec())
@@ -319,7 +327,7 @@ async fn upload_part(
 }
 
 async fn ensure_consistency(client: &Client, desired_datasets: &[&str]) -> anyhow::Result<()> {
-let snaps = zfs::get_current_state(client, &CONFIG.bucket).await?;
+    let snaps = zfs::get_current_state(client, &CONFIG.bucket).await?;
     let snaps_s: Vec<String> = snaps.iter().map(|s| s.to_string()).collect();
     debug!("Current snapshots:\n{}", snaps_s.join("\n"));
 
@@ -330,6 +338,23 @@ let snaps = zfs::get_current_state(client, &CONFIG.bucket).await?;
 
     if actions.is_empty() {
         info!("Nothing to do!");
+        return Ok(());
+    }
+
+    if io::stderr().is_terminal()
+        && !Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!(
+                "These actions are about to be performed, continue?\n{}",
+                actions
+                    .iter()
+                    .map(Action::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ))
+            .default(true)
+            .interact()?
+    {
+        return Ok(());
     }
 
     for act in actions {
@@ -368,13 +393,17 @@ async fn main() -> anyhow::Result<()> {
 
     if args.len() == 2 && args[1] == "recover" {
         if let Err(e) = load::full_recover_all::<chacha20::ChaCha20>(&client).await {
-            error!("Error encountered while restoring: {}\n{:?}",e, e.source());
+            error!("Error encountered while restoring: {}\n{:?}", e, e.source());
         }
     } else if args.len() > 1 {
-        error!("Too many arguments: {}, use \"{} recover\" to start recovery process", args.len(), args[0]);
+        error!(
+            "Too many arguments: {}, use \"{} recover\" to start recovery process",
+            args.len(),
+            args[0]
+        );
         return Err(anyhow::anyhow!("Too many arguments"));
     } else if let Err(r) = ensure_consistency(&client, &desired_datasets).await {
-            error!("Error encountered while ensuring consistency: {}",r);
+        error!("Error encountered while ensuring consistency: {}", r);
     }
 
     info!("Cleaning up...");

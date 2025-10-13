@@ -1,7 +1,3 @@
-use std::{
-    collections::{HashMap, HashSet}, fmt::{self, Write}, io::BufRead, process::ExitStatus
-};
-
 use aws_sdk_s3::{
     Client,
     operation::delete_object::DeleteObjectOutput,
@@ -10,6 +6,13 @@ use aws_sdk_s3::{
 use aws_smithy_types_convert::date_time::DateTimeExt;
 use chacha20::cipher::KeyIvInit;
 use chrono::TimeDelta;
+use std::fmt::{Display, Formatter};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::{self, Write},
+    io::BufRead,
+    process::ExitStatus,
+};
 
 use anyhow::anyhow;
 use log::error;
@@ -50,6 +53,71 @@ impl FullSnapshot {
             restore_status,
         }
     }
+
+    pub fn aws_key(&self) -> String {
+        format!("{}full@{}@{}", SNAPSHOT_PREFIX, self.dataset, self.name)
+    }
+
+    pub async fn take(dataset: &str, name: &str) -> anyhow::Result<Self> {
+        let s = Command::new("sudo")
+            .arg("zfs")
+            .arg("list")
+            .arg("-t")
+            .arg("snapshot")
+            .arg(format!("{}@{}", dataset, name))
+            .spawn()?
+            .wait()
+            .await?;
+
+        if !s.success() {
+            // Did not exist
+            Command::new("sudo")
+                .arg("zfs")
+                .arg("snapshot")
+                .arg("-r")
+                .arg(format!("{}@{}", dataset, name))
+                .spawn()?
+                .wait()
+                .await?;
+        }
+
+        let s = Command::new("sudo")
+            .arg("zfs")
+            .arg("send")
+            .arg("-PnR")
+            .arg(format!("{}@{}", dataset, name))
+            .output()
+            .await?;
+
+        if !s.status.success() || s.stdout.is_empty() {
+            return Err(anyhow!(
+                "Failed to take full snapshot {}@{}: {:?}",
+                dataset,
+                name,
+                s.status.code()
+            ));
+        }
+
+        let s = s.stdout.lines();
+        if let Some(Ok(ll)) = s.last() {
+            if let Some(size) = ll.split('\t').next_back() {
+                let size = size.parse()?;
+
+                Ok(Self {
+                    dataset: dataset.to_owned(),
+                    name: name.to_owned(),
+                    date: chrono::Utc::now(),
+                    size: Some(size),
+                    storage_class: None,
+                    restore_status: None,
+                })
+            } else {
+                Err(anyhow!("Failed to split"))
+            }
+        } else {
+            Err(anyhow!("Empty stdout"))
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -65,6 +133,75 @@ pub struct IncrementalSnapshot {
 }
 
 impl IncrementalSnapshot {
+    pub fn aws_key(&self) -> String {
+        format!(
+            "{}incremental@{}@{}@{}",
+            SNAPSHOT_PREFIX, self.dataset, self.name, self.base
+        )
+    }
+    pub async fn take(dataset: &str, name: &str, from: &str) -> anyhow::Result<Self> {
+        let s = Command::new("sudo")
+            .arg("zfs")
+            .arg("list")
+            .arg("-t")
+            .arg("snapshot")
+            .arg(format!("{}@{}", dataset, name))
+            .spawn()?
+            .wait()
+            .await?;
+
+        if !s.success() {
+            // Did not exist
+            Command::new("sudo")
+                .arg("zfs")
+                .arg("snapshot")
+                .arg("-r")
+                .arg(format!("{}@{}", dataset, name))
+                .spawn()?
+                .wait()
+                .await?;
+        }
+
+        let s = Command::new("sudo")
+            .arg("zfs")
+            .arg("send")
+            .arg("-PnRi")
+            .arg(format!("@{}", from))
+            .arg(format!("{}@{}", dataset, name))
+            .output()
+            .await?;
+
+        if !s.status.success() || s.stdout.is_empty() {
+            return Err(anyhow!(
+                "Failed to take full snapshot {}@{}: {:?}",
+                dataset,
+                name,
+                s.status.code()
+            ));
+        }
+
+        let s = s.stdout.lines();
+        if let Some(Ok(ll)) = s.last() {
+            if let Some(size) = ll.split('\t').next_back() {
+                let size = size.parse()?;
+
+                Ok(Self {
+                    dataset: dataset.to_owned(),
+                    name: name.to_owned(),
+                    date: chrono::Utc::now(),
+                    size: Some(size),
+                    storage_class: None,
+                    restore_status: None,
+                    base: from.to_owned(),
+                })
+            } else {
+                Err(anyhow!("Failed to split"))
+            }
+        } else {
+            Err(anyhow!("Empty stdout"))
+        }
+    }
+
     fn new(
         dataset: String,
         name: String,
@@ -169,11 +306,8 @@ impl Snapshot {
 
     pub fn aws_key(&self) -> String {
         match self {
-            Snapshot::Full(s) => format!("{}full@{}@{}", SNAPSHOT_PREFIX, s.dataset, s.name),
-            Snapshot::Incremental(s) => format!(
-                "{}incremental@{}@{}@{}",
-                SNAPSHOT_PREFIX, s.dataset, s.name, s.base
-            ),
+            Snapshot::Full(s) => s.aws_key(),
+            Snapshot::Incremental(s) => s.aws_key(),
         }
     }
 
@@ -189,70 +323,9 @@ impl Snapshot {
     }
 
     pub fn size(&self) -> &Option<usize> {
-         match self {
+        match self {
             Snapshot::Full(full_snapshot) => &full_snapshot.size,
             Snapshot::Incremental(incremental_snapshot) => &incremental_snapshot.size,
-        }
-    }
-
-    pub async fn take_full(dataset: &str, name: &str) -> anyhow::Result<Self> {
-        let s = Command::new("sudo")
-            .arg("zfs")
-            .arg("list")
-            .arg("-t")
-            .arg("snapshot")
-            .arg(format!("{}@{}", dataset, name))
-            .spawn()?
-            .wait()
-            .await?;
-
-        if !s.success() {
-            // Did not exist
-            Command::new("sudo")
-                .arg("zfs")
-                .arg("snapshot")
-                .arg("-r")
-                .arg(format!("{}@{}", dataset, name))
-                .spawn()?
-                .wait()
-                .await?;
-        }
-
-        let s = Command::new("sudo")
-            .arg("zfs")
-            .arg("send")
-            .arg("-PnR")
-            .arg(format!("{}@{}", dataset, name))
-            .output()
-            .await?;
-
-        if !s.status.success() || s.stdout.is_empty() {
-            return Err(anyhow!(
-                "Failed to take full snapshot {}@{}: {:?}",
-                dataset,
-                name,
-                s.status.code()
-            ));
-        }
-
-        let s = s.stdout.lines();
-        if let Some(Ok(ll)) = s.last() {
-            if let Some(size) = ll.split('\t').next_back() {
-                let size = size.parse()?;
-                
-                Ok(Self::Full(FullSnapshot {
-                    dataset: dataset.to_owned(),
-                    name: name.to_owned(),
-                    date: chrono::Utc::now(),
-                    size: Some(size),
-                    storage_class: None,
-                    restore_status: None,
-                }))
-            } else {
-                Err(anyhow!("Failed to split"))
-            }
-        } else {
-            Err(anyhow!("Empty stdout"))
         }
     }
 }
@@ -269,6 +342,20 @@ pub enum Action {
     Delete(Snapshot),
     CreateFull { dataset: String },
     CreateIncremental { dataset: String, from: String },
+}
+
+impl Display for Action {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Action::Delete(d) => write!(f, "Delete snapshot {}", d),
+            Action::CreateFull { dataset } => write!(f, "Create full snapshot{}", dataset),
+            Action::CreateIncremental { dataset, from } => write!(
+                f,
+                "Create incremental snapshot {} with base {}",
+                dataset, from
+            ),
+        }
+    }
 }
 
 pub enum ActionPerformResult {
@@ -294,20 +381,20 @@ impl Action {
         }
     }
 
-    fn perform_aws_delete(
+    // TODO: Fix this
+    async fn perform_aws_delete(
         s: &Snapshot,
         client: &Client,
-    ) -> impl Future<
-        Output = Result<
-            DeleteObjectOutput,
-            aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::delete_object::DeleteObjectError>,
-        >,
+    ) -> Result<
+        DeleteObjectOutput,
+        aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::delete_object::DeleteObjectError>,
     > {
         client
             .delete_object()
             .bucket(&crate::CONFIG.bucket)
             .key(s.aws_key())
             .send()
+            .await
     }
 
     async fn perform_aws_create_full(ds: &str, client: &Client) -> anyhow::Result<UploadResult> {
@@ -315,7 +402,7 @@ impl Action {
         let snapname = now.format("%Y%m%d").to_string();
 
         // Make snapshot
-        let snap = Snapshot::take_full(ds, &snapname).await?;
+        let snap = FullSnapshot::take(ds, &snapname).await?;
 
         let mut pc = UploadConfig {
             key: snap.aws_key(),
@@ -345,7 +432,8 @@ impl Action {
         let cipher = chacha20::ChaCha20::new(&key.into(), &iv.into());
         let filename = pc.key.clone();
 
-        let hash = crate::encrypt_and_upload(client.clone(), pc, o, cipher, snap.size().unwrap()).await?;
+        let hash =
+            crate::encrypt_and_upload(client.clone(), pc, o, cipher, snap.size.unwrap()).await?;
 
         Ok(UploadResult {
             filename,
@@ -356,30 +444,18 @@ impl Action {
     }
 
     async fn perform_aws_create_incremental(
-        ds: &String,
-        from: &String,
+        ds: &str,
+        from: &str,
         client: &Client,
     ) -> anyhow::Result<UploadResult> {
         let now = chrono::Utc::now();
         let snapname = now.format("%Y%m%d").to_string();
 
         // Make snapshot
-        //if !take_snapshot(ds, &snapname).await?.success() {
-        //    return Err(anyhow!("Failed to make snapshot"));
-        //}
-
-        let snap = IncrementalSnapshot::new(
-            ds.to_owned(),
-            snapname.clone(),
-            now,
-            None,
-            None,
-            None,
-            from.to_owned(),
-        );
+        let snap = IncrementalSnapshot::take(ds, &snapname, from).await?;
 
         let mut pc = UploadConfig {
-            key: Snapshot::Incremental(snap).aws_key(),
+            key: snap.aws_key(),
             bucket: crate::CONFIG.bucket.clone(),
             id: "asd001".to_string(),
         };
@@ -406,22 +482,22 @@ impl Action {
         let cipher = chacha20::ChaCha20::new(&key.into(), &iv.into());
         let filename = pc.key.clone();
 
-        todo!();
-        //let hash = crate::encypt_and_upload(client.clone(), pc, o, cipher, snap.size.clo.unwrap()).await?;
+        let hash =
+            crate::encrypt_and_upload(client.clone(), pc, o, cipher, snap.size.unwrap()).await?;
 
-        /*Ok(UploadResult {
+        Ok(UploadResult {
             filename,
             hash,
             key,
             iv,
-        })*/
+        })
     }
 }
 
 pub fn check_state(desired_datasets: &[&str], state: &[Snapshot], now: UtcDatetime) -> Vec<Action> {
     let mut needed_actions: Vec<Action> = Vec::new();
     let mut new_snaps: HashSet<&str> = HashSet::new();
-    // All desired datasets MUST have a full copy that is less then 180 days old
+    // All desired datasets MUST have a full copy that is less than 180 days old
     let current_fulls: Vec<&str> = state
         .iter()
         .filter_map(|s| match s {
@@ -548,7 +624,6 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
         })
         .collect())
 }
-
 
 async fn delete_snapshot(dataset: &str, name: &str) -> Result<ExitStatus, std::io::Error> {
     Command::new("zfs")

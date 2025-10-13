@@ -53,7 +53,7 @@ pub struct DecryptionInfo {
 impl DecryptionInfo {
     pub fn encrypt(res: crate::zfs::UploadResult) -> anyhow::Result<DecryptionInfo> {
         let mk = RsaPublicKey::from_public_key_pem(&crate::CONFIG.master_key)
-            .expect("Inavild master key");
+            .expect("Invalid master key");
         let mut rng = rand::thread_rng();
         let padding = Oaep::new::<Sha256>();
 
@@ -81,7 +81,7 @@ impl DecryptionInfo {
 
         let (key, iv) = key_iv.split_at(32);
 
-        Ok((key.try_into().unwrap(), iv.try_into().unwrap()))
+        Ok((key.try_into()?, iv.try_into()?))
     }
 
     pub async fn save_to_aws(&self, client: &Client) -> anyhow::Result<PutObjectOutput> {
