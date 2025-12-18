@@ -5,7 +5,7 @@ use aws_sdk_s3::{
 };
 use aws_smithy_types_convert::date_time::DateTimeExt;
 use chacha20::cipher::KeyIvInit;
-use chrono::TimeDelta;
+use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
 use std::fmt::{Display, Formatter};
 use std::{
     collections::{HashMap, HashSet},
@@ -61,8 +61,7 @@ impl FullSnapshot {
     }
 
     pub async fn take(dataset: &str, name: &str) -> anyhow::Result<Self> {
-        let s = Command::new("sudo")
-            .arg("zfs")
+        let s = Command::new("zfs")
             .arg("list")
             .arg("-t")
             .arg("snapshot")
@@ -73,8 +72,7 @@ impl FullSnapshot {
 
         if !s.success() {
             // Did not exist
-            Command::new("sudo")
-                .arg("zfs")
+            Command::new("zfs")
                 .arg("snapshot")
                 .arg("-r")
                 .arg(format!("{}@{}", dataset, name))
@@ -83,8 +81,7 @@ impl FullSnapshot {
                 .await?;
         }
 
-        let s = Command::new("sudo")
-            .arg("zfs")
+        let s = Command::new("zfs")
             .arg("send")
             .arg("-PnR")
             .arg(format!("{}@{}", dataset, name))
@@ -142,8 +139,7 @@ impl IncrementalSnapshot {
         )
     }
     pub async fn take(dataset: &str, name: &str, from: &str) -> anyhow::Result<Self> {
-        let s = Command::new("sudo")
-            .arg("zfs")
+        let s = Command::new("zfs")
             .arg("list")
             .arg("-t")
             .arg("snapshot")
@@ -154,8 +150,7 @@ impl IncrementalSnapshot {
 
         if !s.success() {
             // Did not exist
-            Command::new("sudo")
-                .arg("zfs")
+            Command::new("zfs")
                 .arg("snapshot")
                 .arg("-r")
                 .arg(format!("{}@{}", dataset, name))
@@ -164,8 +159,7 @@ impl IncrementalSnapshot {
                 .await?;
         }
 
-        let s = Command::new("sudo")
-            .arg("zfs")
+        let s = Command::new("zfs")
             .arg("send")
             .arg("-PnRi")
             .arg(format!("@{}", from))
@@ -467,10 +461,17 @@ impl Action {
 
         let o = tokio::io::BufReader::new(o);
 
+        let sclass = if snap.size.unwrap_or(0) >  crate::CONFIG.glacier_size_limit {
+            Some(aws_sdk_s3::types::StorageClass::DeepArchive)
+        } else {
+            None
+        };
+
         let multipart_upload_res = client
             .create_multipart_upload()
             .bucket(&pc.bucket)
             .key(&pc.key)
+            .set_storage_class(sclass)
             .send()
             .await?;
 
@@ -599,11 +600,20 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
             let dataset = parts.get(1)?;
             let name = parts.get(2)?;
 
+            let naive_date = NaiveDate::parse_from_str(name, "%Y%m%d").unwrap();
+
+            // Step 2: convert to DateTime<Utc> (midnight UTC)
+            let dt_utc: DateTime<Utc> = naive_date.and_hms_opt(0, 0, 0)
+                .ok_or("Failed to create time").expect("Failed to parse as date")
+                .and_local_timezone(Utc)
+                .single()
+                .ok_or("Failed to convert to Utc").expect("Failed to parse as date");
+
             match *snap_type {
                 "full" => Some(Snapshot::Full(FullSnapshot::new(
                     dataset.to_string(),
                     name.to_string(),
-                    date.to_chrono_utc().ok()?,
+                    dt_utc,
                     size,
                     storage_class,
                     restore_status,
@@ -613,7 +623,7 @@ pub async fn get_current_state(client: &Client, bucket: &str) -> anyhow::Result<
                     Some(Snapshot::Incremental(IncrementalSnapshot::new(
                         dataset.to_string(),
                         name.to_string(),
-                        date.to_chrono_utc().ok()?,
+                        dt_utc,
                         size,
                         storage_class,
                         restore_status,

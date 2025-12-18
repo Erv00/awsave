@@ -12,6 +12,7 @@ chacha20 = "0.9.1"
 chrono = "0.4.42"
 colog = "1.4.0"
 dialoguer = "0.12.0"
+either = { version = "1.15.0", features = ["serde"] }
 hex = "0.4.3"
 indicatif = "0.18.0"
 indicatif-log-bridge = "0.2.3"

@@ -48,8 +48,8 @@ static CONFIG: Lazy<config::Config> = Lazy::new(|| {
 });
 
 fn open_full(dataset: &str, snapshot: &str) -> Result<tokio::process::Child, io::Error> {
-    Command::new("sudo")
-        .args(["zfs", "send", "-R", &format!("{dataset}@{snapshot}")])
+    Command::new("zfs")
+        .args(["send", "-R", &format!("{dataset}@{snapshot}")])
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -66,9 +66,8 @@ fn open_incremental(
     from: &str,
     to: &str,
 ) -> Result<tokio::process::Child, io::Error> {
-    Command::new("sudo")
+    Command::new("zfs")
         .args([
-            "zfs",
             "send",
             "-Ri",
             &format!("@{}", from),
@@ -84,8 +83,7 @@ pub fn zfs_recv(dataset: &str, snapshot: Option<&str>) -> Result<tokio::process:
         Some(snap) => format!("{}@{}", dataset, snap),
         None => dataset.to_owned(),
     };
-    Command::new("sudo")
-        .arg("zfs")
+    Command::new("zfs")
         .arg("recv")
         .arg(name)
         .stdin(Stdio::piped())
@@ -443,15 +441,29 @@ async fn main() -> anyhow::Result<()> {
             .join("\n")
     );
     let outdated_time = Utc::now()
-        .checked_sub_days(Days::new(190))
-        .expect("Failed to go back 190 days");
-    let outdated = localsnaps
+        .checked_sub_days(Days::new(2*7))
+        .expect("Failed to go back 2 weeks");
+    let outdated: Vec<_> = localsnaps
         .into_iter()
-        .filter(|s| s.creation_date < outdated_time);
+        .filter(|s| s.creation_date < outdated_time).collect();
 
-    for s in outdated {
-        info!("Deleting snapshot {}", s);
-        zfs::delete_snapshot(&s.dataset, &s.snapshot_name).await?;
+    if outdated.len() > 0 && io::stderr().is_terminal()
+        && Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!(
+            "The following snapshots are about to be deleted, continue?\n{}",
+            outdated
+                .iter()
+                .map(ZfsSnapshotListEntry::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))
+        .default(true)
+        .interact()? {
+        for s in outdated {
+            //panic!("HERE");
+            info!("Deleting snapshot {}", s);
+            zfs::delete_snapshot(&s.dataset, &s.snapshot_name).await?;
+        }
     }
 
     info!("Done");
